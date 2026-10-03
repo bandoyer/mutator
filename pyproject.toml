@@ -3,6 +3,8 @@ name = "mutator"
 version = "0.1.0"
 description = "Mutation testing for Clojure, Java, Go, TypeScript, Rust, and Python, in the snapshot uml-viewer reads."
 readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: Zero-Clause BSD (0BSD)"]
 requires-python = ">=3.11"
 dependencies = [
     "tree-sitter>=0.24",
