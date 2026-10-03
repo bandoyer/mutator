@@ -115,11 +115,29 @@ def project_functions(source: str, path: Path, root: Path):
     )
 
 
-def _owner(functions, line: int):
-    matches = [fn for fn in functions if fn.start_line <= line <= fn.end_line]
+def _contains(fn, line: int, byte: int | None) -> bool:
+    if fn.start_line > line or fn.end_line < line:
+        return False
+    start = getattr(fn, "start_byte", -1)
+    end = getattr(fn, "end_byte", -1)
+    if byte is None or start < 0 or end < 0:
+        return True
+    return start <= byte < end
+
+
+def _tightness(fn) -> int:
+    start = getattr(fn, "start_byte", -1)
+    end = getattr(fn, "end_byte", -1)
+    if start >= 0 and end >= start:
+        return end - start
+    return (fn.end_line - fn.start_line) * 1_000_000
+
+
+def _owner(functions, line: int, byte: int | None = None):
+    matches = [fn for fn in functions if _contains(fn, line, byte)]
     if not matches:
         return None
-    return min(matches, key=lambda fn: (fn.end_line - fn.start_line, fn.start_line))
+    return min(matches, key=lambda fn: (_tightness(fn), fn.start_line))
 
 
 def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Site]:
@@ -133,7 +151,7 @@ def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Si
     }
     found: list[Site] = []
     for raw in discover_raw(source, language, path.as_posix()):
-        owner = _owner(functions, raw.line)
+        owner = _owner(functions, raw.line, raw.start)
         if owner is None:
             continue
         private = privacy[id(owner)]

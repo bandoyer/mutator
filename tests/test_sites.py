@@ -163,3 +163,34 @@ def test_python_private_and_class_namespace(tmp_path):
 def test_string_operators_are_not_sites(tmp_path):
     source = 'def place():\n    return "x > 0 and true"\n'
     assert _sites(tmp_path, "src/demo/app.py", source) == []
+
+
+def test_typescript_mutates_nullish_and_optional_chaining(tmp_path):
+    source = """
+export function place(a, b) {
+  return a ?? b?.c ?? b?.[0] ?? b?.();
+}
+"""
+    sites = _sites(tmp_path, "src/demo/app.ts", source)
+    assert sum(site.original == "??" and site.mutant == "||" for site in sites) == 3
+    assert {site.mutant for site in sites if site.original == "?."} == {".", ""}
+    assert {site.namespace for site in sites} == {"demo.app"}
+
+
+def test_javascript_express_handler_owns_its_nullish_site(tmp_path):
+    source = """
+export function mount(app) {
+  app.get("/users", (req, res) => {
+    return req.body ?? false;
+  });
+}
+"""
+    sites = _sites(tmp_path, "src/demo/routes.js", source)
+    assert {site.namespace for site in sites} == {"demo.routes"}
+    assert ("GET /users", "??", "||") in {(site.name, site.original, site.mutant) for site in sites}
+    assert all(site.name != "mount" for site in sites)
+
+
+def test_a_quoted_nullish_operator_is_not_a_site(tmp_path):
+    source = 'export function place() {\n  return "a ?? b?.c";\n}\n'
+    assert _sites(tmp_path, "src/demo/app.ts", source) == []

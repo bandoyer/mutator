@@ -219,6 +219,10 @@ def test_privacy_headers_digests_owners_and_mutation_fields(tmp_path):
 def test_grammar_guards_and_non_head_clojure_symbols(tmp_path):
     assert _grammar("typescript", "src/app.tsx") == "tsx"
     assert _grammar("typescript", "src/app.ts") == "typescript"
+    assert _grammar("typescript", "src/app.js") == "javascript"
+    assert _grammar("typescript", "src/app.mjs") == "javascript"
+    assert _grammar("typescript", "src/app.cjs") == "javascript"
+    assert _grammar("typescript", "src/app.jsx") == "javascript"
     assert _grammar("python", "src/app.py") == "python"
 
     sites, pairs = _pairs(tmp_path, "src/demo/core.clj", "(ns demo.core)\n(defn place []\n  [inc])\n")

@@ -2,7 +2,9 @@
 
 Clojure follows clj-mutate's symbol rules. Go follows mutate4go, including
 one-way `*` to `/`. Java follows mutate4java. TypeScript, Rust, and Python
-use the same decisions as Java, spelled in that language.
+use the same decisions as Java, spelled in that language. TypeScript also
+mutates `??` to `||` and `?.` to `.` (removed on a call or index). JavaScript
+files use the TypeScript rules.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ _BINARY = {
     "!==": "===",
     "&&": "||",
     "||": "&&",
+    "??": "||",
     "and": "or",
     "or": "and",
 }
@@ -100,8 +103,12 @@ class RawSite:
 
 
 def _grammar(language: str, path: str) -> str:
-    if language == "typescript" and path.endswith(".tsx"):
-        return "tsx"
+    if language == "typescript":
+        if path.endswith(".tsx"):
+            return "tsx"
+        if path.endswith((".js", ".jsx", ".mjs", ".cjs")):
+            return "javascript"
+        return "typescript"
     if language == "go":
         return "go"
     return language
@@ -118,7 +125,7 @@ def _category(token: str) -> str:
         return "comparison"
     if token in {"==", "!=", "===", "!=="}:
         return "equality"
-    if token in {"&&", "||", "and", "or"}:
+    if token in {"&&", "||", "??", "and", "or"}:
         return "logical"
     return "arithmetic"
 
@@ -126,7 +133,25 @@ def _category(token: str) -> str:
 def _binary_mutant(language: str, token: str) -> str | None:
     if language == "go" and token == "/":
         return None
+    if token == "??" and language != "typescript":
+        return None
     return _BINARY.get(token)
+
+
+def _optional_mutant(node) -> str | None:
+    """`a?.b` becomes `a.b`. A call or index drops `?.`, so `a?.()` becomes `a()`."""
+
+    parent = node.parent
+    if parent is None:
+        return None
+    host = parent.parent if parent.type == "optional_chain" else parent
+    if host is None:
+        return None
+    if host.type == "member_expression":
+        return "."
+    if host.type in {"call_expression", "subscript_expression"}:
+        return ""
+    return None
 
 
 def _add(found: list[RawSite], node, original: str, mutant: str, category: str) -> None:
@@ -217,6 +242,10 @@ def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
             mutant = _binary_mutant(language, token)
             if mutant is not None:
                 _add(found, node, token, mutant, _category(token))
+        if language == "typescript" and token == "?.":
+            optional = _optional_mutant(node)
+            if optional is not None:
+                _add(found, node, "?.", optional, "optional")
         if token in {"!", "not"} and parent in _UNARY_PARENTS | {"comparison_operator"}:
             _add(found, node, token, "", "unary")
         if token == "-" and parent in _UNARY_PARENTS:
