@@ -31,32 +31,65 @@ def keyword(name: str) -> tuple:
     return ("keyword", name)
 
 
-def _render(value) -> str:
-    if value is None:
-        return "nil"
-    if isinstance(value, tuple) and len(value) == 2 and value[0] == "keyword":
-        return f":{value[1]}"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
+def _render_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _render_number(value) -> str:
     if isinstance(value, float):
         text = f"{value:.4f}".rstrip("0").rstrip(".")
         if "." not in text:
             text += ".0"
         return text
+    return str(value)
+
+
+def _render_atom(value) -> str | None:
+    if value is None:
+        return "nil"
+    # bool is a subclass of int, so it has to be chosen first.
+    if isinstance(value, bool):
+        return _render_bool(value)
+    if isinstance(value, (int, float)):
+        return _render_number(value)
     if isinstance(value, str):
         return f'"{_escape(value)}"'
+    return None
+
+
+def _render_keyword(value) -> str | None:
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "keyword":
+        return f":{value[1]}"
+    return None
+
+
+def _render_sequence(value) -> str:
+    body = " ".join(_render(item) for item in value)
+    return f"[{body}]" if body else "[]"
+
+
+def _render_key(key) -> str:
+    if isinstance(key, str) and _keyword_key(key):
+        return f":{key}"
+    return _render(key)
+
+
+def _render_map(value: dict) -> str:
+    parts = [f"{_render_key(key)} {_render(item)}" for key, item in value.items()]
+    return "{" + " ".join(parts) + "}"
+
+
+def _render(value) -> str:
+    atom = _render_atom(value)
+    if atom is not None:
+        return atom
+    rendered = _render_keyword(value)
+    if rendered is not None:
+        return rendered
     if isinstance(value, (list, tuple)):
-        body = " ".join(_render(item) for item in value)
-        return f"[{body}]" if body else "[]"
+        return _render_sequence(value)
     if isinstance(value, dict):
-        parts = []
-        for key, item in value.items():
-            rendered_key = f":{key}" if isinstance(key, str) and _keyword_key(key) else _render(key)
-            parts.append(f"{rendered_key} {_render(item)}")
-        body = " ".join(parts)
-        return "{" + body + "}"
+        return _render_map(value)
     raise TypeError(f"cannot render {type(value).__name__} as EDN")
 
 

@@ -235,31 +235,74 @@ def _visit_clojure(node, data: bytes, found: list[RawSite]) -> None:
         stack.extend(reversed(current.children))
 
 
-def _visit_node(node, data: bytes, language: str, found: list[RawSite]) -> None:
-    parent = node.parent.type if node.parent is not None else ""
-    if node.child_count == 0:
-        token = _text(data, node)
-        # A literal sits inside the same expression as an operator, so these
-        # checks are independent. `0` is a child of `a > 0`, not an operator.
-        if parent in _BINARY_PARENTS:
-            mutant = _binary_mutant(language, token)
-            if mutant is not None:
-                _add(found, node, token, mutant, _category(token))
-        if language == "typescript" and token == "?.":
-            optional = _optional_mutant(node)
-            if optional is not None:
-                _add(found, node, "?.", optional, "optional")
-        if token in {"!", "not"} and parent in _UNARY_PARENTS | {"comparison_operator"}:
-            _add(found, node, token, "", "unary")
-        if token == "-" and parent in _UNARY_PARENTS:
-            _add(found, node, token, "", "unary")
-        if node.type in {"true", "false"} and token in _BOOLEANS:
-            _add(found, node, token, _BOOLEANS[token], "boolean")
-        if node.type in _NUMBERS and token in {"0", "1"}:
-            _add(found, node, token, "1" if token == "0" else "0", "constant")
-    elif node.type == "bool_lit" and _text(data, node) in _BOOLEANS:
-        text = _text(data, node)
+def _parent_type(node) -> str:
+    if node.parent is None:
+        return ""
+    return node.parent.type
+
+
+def _visit_binary(node, token: str, parent: str, language: str, found: list[RawSite]) -> None:
+    if parent not in _BINARY_PARENTS:
+        return
+    mutant = _binary_mutant(language, token)
+    if mutant is not None:
+        _add(found, node, token, mutant, _category(token))
+
+
+def _visit_optional(node, token: str, language: str, found: list[RawSite]) -> None:
+    if language != "typescript" or token != "?.":
+        return
+    optional = _optional_mutant(node)
+    if optional is not None:
+        _add(found, node, "?.", optional, "optional")
+
+
+def _visit_not(node, token: str, parent: str, found: list[RawSite]) -> None:
+    if token in {"!", "not"} and parent in _UNARY_PARENTS | {"comparison_operator"}:
+        _add(found, node, token, "", "unary")
+
+
+def _visit_negation(node, token: str, parent: str, found: list[RawSite]) -> None:
+    if token == "-" and parent in _UNARY_PARENTS:
+        _add(found, node, token, "", "unary")
+
+
+def _visit_boolean_token(node, token: str, found: list[RawSite]) -> None:
+    if node.type in {"true", "false"} and token in _BOOLEANS:
+        _add(found, node, token, _BOOLEANS[token], "boolean")
+
+
+def _visit_constant(node, token: str, found: list[RawSite]) -> None:
+    if node.type in _NUMBERS and token in {"0", "1"}:
+        _add(found, node, token, _flip01(token), "constant")
+
+
+def _visit_bool_lit(node, data: bytes, found: list[RawSite]) -> None:
+    if node.type != "bool_lit":
+        return
+    text = _text(data, node)
+    if text in _BOOLEANS:
         _add(found, node, text, _BOOLEANS[text], "boolean")
+
+
+def _visit_leaf(node, data: bytes, language: str, found: list[RawSite]) -> None:
+    # A literal sits inside the same expression as an operator, so these
+    # checks are independent. `0` is a child of `a > 0`, not an operator.
+    token = _text(data, node)
+    parent = _parent_type(node)
+    _visit_binary(node, token, parent, language, found)
+    _visit_optional(node, token, language, found)
+    _visit_not(node, token, parent, found)
+    _visit_negation(node, token, parent, found)
+    _visit_boolean_token(node, token, found)
+    _visit_constant(node, token, found)
+
+
+def _visit_node(node, data: bytes, language: str, found: list[RawSite]) -> None:
+    if node.child_count == 0:
+        _visit_leaf(node, data, language, found)
+    else:
+        _visit_bool_lit(node, data, found)
 
 
 def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:

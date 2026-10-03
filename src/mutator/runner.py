@@ -177,6 +177,61 @@ def _python_command(directory: Path) -> list[str]:
     return [interpreter, "-m", "unittest", "discover"]
 
 
+def _nearest_marker(source: Path, root: Path, markers: tuple[str, ...]) -> Path:
+    for marker in markers:
+        found = nearest(source, marker, root)
+        if found is not None:
+            return found
+    return root
+
+
+def _go_package(directory: Path, source: Path) -> str:
+    relative = source.resolve().parent.relative_to(directory.resolve())
+    if relative == Path("."):
+        return "."
+    return "./" + relative.as_posix()
+
+
+def _clojure_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    directory = _nearest_marker(source, root, ("deps.edn", "bb.edn"))
+    return _clojure_command(directory), directory
+
+
+def _java_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    directory = _nearest_marker(source, root, ("pom.xml",))
+    return ["mvn", "-q", "test", "-DexcludeTags=no-mutate"], directory
+
+
+def _go_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    directory = _nearest_marker(source, root, ("go.mod",))
+    return ["go", "test", "-count=1", _go_package(directory, source)], directory
+
+
+def _typescript_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    directory = _nearest_marker(source, root, ("package.json",))
+    return ["npm", "test"], directory
+
+
+def _rust_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    directory = _nearest_marker(source, root, ("Cargo.toml",))
+    return ["cargo", "test"], directory
+
+
+def _python_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    directory = _nearest_marker(source, root, ("pyproject.toml", "pytest.ini", "setup.cfg"))
+    return _python_command(directory), directory
+
+
+_PLANS = {
+    "clojure": _clojure_plan,
+    "java": _java_plan,
+    "go": _go_plan,
+    "typescript": _typescript_plan,
+    "rust": _rust_plan,
+    "python": _python_plan,
+}
+
+
 def test_plan(root: Path, source: Path, language: str, override: str | None) -> tuple[Command, Path]:
     """The test command and the directory it runs in.
 
@@ -187,29 +242,7 @@ def test_plan(root: Path, source: Path, language: str, override: str | None) -> 
     root = root.resolve()
     if override:
         return override, root
-    if language == "clojure":
-        directory = nearest(source, "deps.edn", root) or nearest(source, "bb.edn", root) or root
-        return _clojure_command(directory), directory
-    if language == "java":
-        directory = nearest(source, "pom.xml", root) or root
-        return ["mvn", "-q", "test", "-DexcludeTags=no-mutate"], directory
-    if language == "go":
-        directory = nearest(source, "go.mod", root) or root
-        relative = source.resolve().parent.relative_to(directory.resolve())
-        package = "." if relative == Path(".") else "./" + relative.as_posix()
-        return ["go", "test", "-count=1", package], directory
-    if language == "typescript":
-        directory = nearest(source, "package.json", root) or root
-        return ["npm", "test"], directory
-    if language == "rust":
-        directory = nearest(source, "Cargo.toml", root) or root
-        return ["cargo", "test"], directory
-    if language == "python":
-        directory = (
-            nearest(source, "pyproject.toml", root)
-            or nearest(source, "pytest.ini", root)
-            or nearest(source, "setup.cfg", root)
-            or root
-        )
-        return _python_command(directory), directory
-    return ["false"], root
+    plan = _PLANS.get(language)
+    if plan is None:
+        return ["false"], root
+    return plan(root, source)

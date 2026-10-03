@@ -33,28 +33,80 @@ def _parts(path: str) -> tuple[str, ...]:
     return tuple(part for part in path.split("/") if part)
 
 
-def _rank(key_parts: tuple[str, ...], sources: list[tuple[str, ...]]) -> tuple[int, int] | None:
-    """How well one report key names one of the source paths.
+def _as_suffix(longer: tuple[str, ...], shorter: tuple[str, ...]) -> int | None:
+    """How many extra parts `longer` adds in front of `shorter`, when it ends with it."""
 
-    Rank `(0, extra)` is a key that ends with the source and may add a prefix.
-    Rank `(1, missing)` is a shorter key that the source path ends with. The
-    smaller rank is the longer shared suffix. Two different keys at the same
-    rank are ambiguous.
+    if len(longer) >= len(shorter) and longer[-len(shorter) :] == shorter:
+        return len(longer) - len(shorter)
+    return None
+
+
+def _suffix_rank(key_parts: tuple[str, ...], source: tuple[str, ...]) -> tuple[int, int] | None:
+    """Rank `(0, extra)` is a key that ends with the source. `(1, missing)` is the reverse.
+
+    An equal path is rank `(0, 0)`. A shorter key matches only when the source
+    is strictly longer, so an equal path is not also a missing-part match.
+    """
+
+    if not source or not key_parts:
+        return None
+    extra = _as_suffix(key_parts, source)
+    if extra is not None:
+        return (0, extra)
+    if len(source) <= len(key_parts):
+        return None
+    missing = _as_suffix(source, key_parts)
+    if missing is None:
+        return None
+    return (1, missing)
+
+
+def _rank(key_parts: tuple[str, ...], sources: list[tuple[str, ...]]) -> tuple[int, int] | None:
+    """The best suffix rank of one report key against the source paths.
+
+    The smaller rank is the longer shared suffix. Two different keys at the
+    same rank are ambiguous.
     """
 
     best: tuple[int, int] | None = None
     for source in sources:
-        if not source or not key_parts:
-            continue
-        if len(key_parts) >= len(source) and key_parts[-len(source) :] == source:
-            rank = (0, len(key_parts) - len(source))
-        elif len(source) > len(key_parts) and source[-len(key_parts) :] == key_parts:
-            rank = (1, len(source) - len(key_parts))
-        else:
+        rank = _suffix_rank(key_parts, source)
+        if rank is None:
             continue
         if best is None or rank < best:
             best = rank
     return best
+
+
+def _source_parts(candidates: list[str]) -> list[tuple[str, ...]]:
+    sources: list[tuple[str, ...]] = []
+    for candidate in candidates:
+        parts = _parts(candidate)
+        if parts and parts not in sources:
+            sources.append(parts)
+    return sources
+
+
+def _keep_match(best, best_rank, key_parts, value, rank):
+    if best_rank is None or rank < best_rank:
+        return rank, [(key_parts, value)]
+    if rank == best_rank:
+        best.append((key_parts, value))
+    return best_rank, best
+
+
+def _best_value(normalized: dict, sources: list[tuple[str, ...]]):
+    best_rank: tuple[int, int] | None = None
+    best: list[tuple[tuple[str, ...], object]] = []
+    for key, value in normalized.items():
+        key_parts = _parts(key)
+        rank = _rank(key_parts, sources)
+        if rank is None:
+            continue
+        best_rank, best = _keep_match(best, best_rank, key_parts, value, rank)
+    if len({parts for parts, _value in best}) != 1:
+        return None
+    return best[0][1]
 
 
 def _lookup(index: dict, source_path: str):
@@ -67,26 +119,7 @@ def _lookup(index: dict, source_path: str):
     found = _exact(normalized, candidates)
     if found is not None:
         return found
-    sources: list[tuple[str, ...]] = []
-    for candidate in candidates:
-        parts = _parts(candidate)
-        if parts and parts not in sources:
-            sources.append(parts)
-    best_rank: tuple[int, int] | None = None
-    best: list[tuple[tuple[str, ...], object]] = []
-    for key, value in normalized.items():
-        key_parts = _parts(key)
-        rank = _rank(key_parts, sources)
-        if rank is None:
-            continue
-        if best_rank is None or rank < best_rank:
-            best_rank = rank
-            best = [(key_parts, value)]
-        elif rank == best_rank:
-            best.append((key_parts, value))
-    if len({parts for parts, _value in best}) != 1:
-        return None
-    return best[0][1]
+    return _best_value(normalized, _source_parts(candidates))
 
 
 def _covered_from_pairs(lines: dict[int, tuple[int, int]] | None) -> set[int] | None:
