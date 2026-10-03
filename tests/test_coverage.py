@@ -55,3 +55,44 @@ def test_lcov_marks_executed_lines(tmp_path):
     source.write_text("def place():\n    return 1\n", encoding="utf-8")
     assert covered_lines(tmp_path, source, "python") == {1}
     assert covered_lines(tmp_path, source, "clojure") == {1}
+
+
+def test_lcov_does_not_let_a_shorter_path_steal_hits(tmp_path):
+    report = tmp_path / "target" / "coverage" / "python" / "lcov.info"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "SF:b/app.py\nDA:2,1\nend_of_record\n"
+        "SF:a/b/app.py\nDA:1,1\nend_of_record\n",
+        encoding="utf-8",
+    )
+    short = tmp_path / "b" / "app.py"
+    long = tmp_path / "a" / "b" / "app.py"
+    short.parent.mkdir(parents=True)
+    long.parent.mkdir(parents=True)
+    short.write_text("def place():\n    return 1\n", encoding="utf-8")
+    long.write_text("def place():\n    return 1\n", encoding="utf-8")
+    assert covered_lines(tmp_path, long, "python") == {1}
+    assert covered_lines(tmp_path, short, "python") == {2}
+
+
+def test_go_profile_does_not_cross_files(tmp_path):
+    profile = tmp_path / "target" / "coverage" / "go" / "coverage.out"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "mode: set\n"
+        "b/widget.go:2.1,2.2 1 1\n"
+        "a/b/widget.go:3.1,3.2 1 0\n",
+        encoding="utf-8",
+    )
+    short = tmp_path / "b" / "widget.go"
+    long = tmp_path / "a" / "b" / "widget.go"
+    short.parent.mkdir(parents=True)
+    long.parent.mkdir(parents=True)
+    short.write_text("package b\nfunc Run() {}\n", encoding="utf-8")
+    long.write_text("package b\nfunc Run() {}\n", encoding="utf-8")
+    assert covered_lines(tmp_path, short, "go") == {2}
+    assert covered_lines(tmp_path, long, "go") == set()
+
+    profile.write_text("mode: set\na/b/widget.go:2.1,2.2 1 1\n", encoding="utf-8")
+    assert covered_lines(tmp_path, short, "go") is None
+    assert covered_lines(tmp_path, long, "go") == {2}

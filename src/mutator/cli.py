@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -13,7 +14,44 @@ from mutator.engine import mutate_file, restore_backups, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner
 
-HELP = """\
+
+def _skipped_directory_text() -> str:
+    """The directories the walker skips, named the same way in --help."""
+
+    names = {
+        ".clj-kondo",
+        ".git",
+        ".hg",
+        ".idea",
+        ".metrics",
+        ".svn",
+        ".venv",
+        "__pycache__",
+        "__tests__",
+        "build",
+        "coverage",
+        "dist",
+        "node_modules",
+        "out",
+        "spec",
+        "specs",
+        "target",
+        "test",
+        "testdata",
+        "tests",
+        "venv",
+        "vendor",
+    }
+    try:
+        crapper = ensure_crapper()
+        names = set(crapper.discover.SKIP_DIRS) | set(crapper.discover.TEST_DIRS)
+    except ImportError:
+        pass
+    ordered = sorted(names)
+    return ", ".join(ordered[:-1]) + ", and " + ordered[-1]
+
+
+HELP = f"""\
 Usage: mutator [options] [path-or-filter ...]
 
 Discover mutation sites in Clojure, Java, Go, TypeScript, Rust, and Python,
@@ -67,7 +105,7 @@ Arguments:
                     path contains this text are mutated.
 
 With no paths, source files under the project root are mutated. Directories
-named test, tests, spec, specs, vendor, node_modules, and target are skipped.
+named {_skipped_directory_text()} are skipped.
 
 The default, once a snapshot exists, reruns survivors and sites in functions
 whose text changed. Killed mutants in unchanged functions are kept.
@@ -254,26 +292,55 @@ def parse_args(argv: list[str] | None = None) -> Options:
     return options
 
 
-def _changed_files(root: Path) -> list[Path]:
+class GitStatusError(Exception):
+    """git status could not be read. `code` is git's own status."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _git(root: Path, *args: str) -> bytes:
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=root,
+        ["git", "-C", os.fspath(root), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         check=False,
-        capture_output=True,
-        text=True,
     )
     if result.returncode != 0:
-        print(result.stderr.strip() or "git status failed", file=sys.stderr)
-        return []
+        message = os.fsdecode(result.stderr).strip() or "git status failed"
+        raise GitStatusError(result.returncode, message)
+    return result.stdout
+
+
+def _changed_files(root: Path) -> list[Path]:
+    """Added and modified files under `root`, as paths from the repo root.
+
+    `-z` keeps spaces and non-ASCII names intact. A missing path, including a
+    deletion, is left out. A rename is the new file only.
+    """
+
+    toplevel = Path(os.fsdecode(_git(root, "rev-parse", "--show-toplevel")).strip())
+    status = _git(
+        root,
+        "status",
+        "--porcelain",
+        "-z",
+        "--no-renames",
+        "--untracked-files=all",
+        "--",
+        ".",
+    )
+    root_resolved = root.resolve()
     found: list[Path] = []
-    for line in result.stdout.splitlines():
-        if len(line) < 4:
+    for entry in status.split(b"\0"):
+        if len(entry) <= 3:
             continue
-        path_text = line[3:].strip()
-        if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
-        path_text = path_text.strip('"')
-        found.append((root / path_text).resolve())
+        path = (toplevel / os.fsdecode(entry[3:])).resolve()
+        if not path.is_file() or not path.is_relative_to(root_resolved):
+            continue
+        found.append(path)
     return found
 
 
@@ -292,8 +359,13 @@ def _positionals(root: Path, args: list[str]) -> tuple[list[Path], list[str]]:
 
 
 def _changed_sources(root: Path, crapper) -> list[Path]:
+    skip = set(crapper.discover.SKIP_DIRS) | set(crapper.discover.TEST_DIRS)
+    root_resolved = root.resolve()
     files = []
     for path in _changed_files(root):
+        relative = path.relative_to(root_resolved)
+        if not skip.isdisjoint(relative.parts):
+            continue
         if crapper.discover.language_of(path) is None:
             continue
         if crapper.discover.is_test_file(path):
@@ -358,13 +430,32 @@ def select_files(options: Options) -> list[Path]:
     return sorted(set(_inside_root(_matching(files, filters), root)), key=lambda item: item.as_posix())
 
 
-def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> None:
-    if options.no_coverage or options.use_existing_coverage:
-        return
-    if options.scan:
-        return
+def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> int:
+    """Run coverage generation. A failed command's code is returned as-is.
+
+    Reports already on disk are left unread when the command fails, so a stale
+    100% report cannot score the run.
+    """
+
+    if options.no_coverage or options.use_existing_coverage or options.scan:
+        return 0
+    if options.coverage_command:
+        result = CommandRunner(verbose=options.verbose).run(options.coverage_command, root, None)
+        if result.code != 0:
+            print(
+                f"Coverage command exited {result.code}. Reports already on disk will not be read.",
+                file=sys.stderr,
+            )
+            tail = "\n".join(result.output.splitlines()[-20:])
+            if tail:
+                print(tail, file=sys.stderr)
+            return result.code
+        return 0
     crapper = ensure_crapper()
-    crapper.runners.run_coverage(root, files, options.coverage_command)
+    code = crapper.runners.run_coverage(root, files, None)
+    if isinstance(code, int) and code != 0:
+        return code
+    return 0
 
 
 def _coverage_for(options: Options, root: Path, path: Path) -> set[int] | None:
@@ -437,7 +528,7 @@ def _finish(baseline_failed: bool, survived: bool) -> int:
 
 def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
     runner = CommandRunner(verbose=options.verbose)
-    baselines: dict[tuple[str, str], tuple[bool, float, str]] = {}
+    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]] = {}
     forms = []
     written: list[str] = []
     baseline_failed = False
@@ -478,13 +569,19 @@ def run(argv: list[str] | None = None) -> int:
         print(missing, file=sys.stderr)
         return 2
     root = options.project_root.resolve()
-    files = select_files(options)
+    try:
+        files = select_files(options)
+    except GitStatusError as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
     if not files:
         print("No source files to mutate.")
         return 0
     if not options.scan:
         _restore(root)
-    _prepare_coverage(options, root, files)
+    coverage = _prepare_coverage(options, root, files)
+    if coverage != 0:
+        return coverage
     if options.scan:
         return _scan(options, root, files)
     return _mutate_files(options, root, files)

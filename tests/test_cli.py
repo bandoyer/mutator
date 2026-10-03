@@ -42,6 +42,8 @@ def test_help_and_conflicting_flags():
     help_options = parse_args(["--help"])
     assert help_options.exit_code == 0
     assert "uml-viewer" in help_options.message
+    assert "__pycache__" in help_options.message
+    assert "testdata" in help_options.message
     conflict = parse_args(["--mutate-all", "--since-last-run", "src/demo.py"])
     assert conflict.exit_code == 1
     assert run(["--help"]) == 0
@@ -92,3 +94,28 @@ def test_real_python_mutants_update_the_snapshot(tmp_path, capsys):
     assert ":namespace \"demo\"" in text
     assert ":id \"defn/add\"" in text
     assert path.read_text(encoding="utf-8").startswith("def add")
+
+
+def test_a_failed_coverage_command_does_not_read_the_report(tmp_path, capsys):
+    path = tmp_path / "src" / "app.py"
+    path.parent.mkdir()
+    path.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
+    report = tmp_path / "target" / "coverage" / "python" / "lcov.info"
+    report.parent.mkdir(parents=True)
+    report.write_text("SF:src/app.py\nDA:1,1\nDA:2,1\nend_of_record\n", encoding="utf-8")
+    code = run(
+        [
+            "--root",
+            str(tmp_path),
+            "--coverage-command",
+            "exit 3",
+            "--test-command",
+            "false",
+            "src/app.py",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "will not be read" in captured.err
+    assert "Baseline failed" not in captured.err
+    assert path.read_text(encoding="utf-8").startswith("def place")

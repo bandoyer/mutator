@@ -227,12 +227,15 @@ def _clojure_node(node, data: bytes, found: list[RawSite]) -> None:
 
 
 def _visit_clojure(node, data: bytes, found: list[RawSite]) -> None:
-    _clojure_node(node, data, found)
-    for child in node.children:
-        _visit_clojure(child, data, found)
+    # An explicit stack: a 1,200-deep form must not raise RecursionError.
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        _clojure_node(current, data, found)
+        stack.extend(reversed(current.children))
 
 
-def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
+def _visit_node(node, data: bytes, language: str, found: list[RawSite]) -> None:
     parent = node.parent.type if node.parent is not None else ""
     if node.child_count == 0:
         token = _text(data, node)
@@ -257,8 +260,15 @@ def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
     elif node.type == "bool_lit" and _text(data, node) in _BOOLEANS:
         text = _text(data, node)
         _add(found, node, text, _BOOLEANS[text], "boolean")
-    for child in node.children:
-        _visit(child, data, language, found)
+
+
+def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
+    # An explicit stack: a 1,200-term expression must not raise RecursionError.
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        _visit_node(current, data, language, found)
+        stack.extend(reversed(current.children))
 
 
 def discover_raw(source: str, language: str, path: str) -> list[RawSite]:

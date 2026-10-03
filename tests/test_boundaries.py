@@ -6,6 +6,7 @@ alone when no input can tell the operators apart.
 """
 
 import hashlib
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from mutator.cli import (
+    GitStatusError,
     _changed_files,
     _is_source,
     _prepare_coverage,
@@ -21,7 +23,7 @@ from mutator.cli import (
     run,
     select_files,
 )
-from mutator.coverage import _candidates, _jacoco_index, _suffix_hit, covered_lines
+from mutator.coverage import _candidates, _jacoco_index, covered_lines
 from mutator.crapper_link import ensure_crapper
 from mutator.edn import loads
 from mutator.engine import (
@@ -246,7 +248,6 @@ def test_grammar_guards_and_non_head_clojure_symbols(tmp_path):
 def test_coverage_indexes_use_package_names_form_counts_and_exact_paths(tmp_path):
     assert _candidates(lambda value: value, "") == []
     assert _candidates(lambda _value: "same", "src/app.py") == ["same"]
-    assert _suffix_hit("demo/Board.java", ["Other.java"], lambda left, right: left.endswith(right)) is False
 
     report = tmp_path / "target" / "site" / "jacoco" / "jacoco.xml"
     report.parent.mkdir(parents=True)
@@ -288,7 +289,7 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     both.mkdir()
     (both / "bb.edn").write_text("{:tasks {test (clojure)}}\n", encoding="utf-8")
     (both / "deps.edn").write_text("{:deps {}}\n", encoding="utf-8")
-    assert _clojure_command(both) == "clj -M:test"
+    assert _clojure_command(both) == ["clj", "-M:test"]
 
     root = tmp_path / "proj"
     sub = root / "svc"
@@ -299,28 +300,28 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     clojure.write_text("(defn place [] 1)\n", encoding="utf-8")
     command, directory = command_for(root, clojure, "clojure", None)
     assert directory == sub
-    assert command == "bb test"
+    assert command == ["bb", "test"]
 
     (sub / "pom.xml").write_text("<project/>\n", encoding="utf-8")
     java = sub / "src" / "A.java"
     java.write_text("class A { int place(){ return 1; } }\n", encoding="utf-8")
     command, directory = command_for(root, java, "java", None)
     assert directory == sub
-    assert command == "mvn -q test -DexcludeTags=no-mutate"
+    assert command == ["mvn", "-q", "test", "-DexcludeTags=no-mutate"]
 
     (sub / "package.json").write_text("{}\n", encoding="utf-8")
     typescript = sub / "src" / "a.ts"
     typescript.write_text("export function place(){ return 1; }\n", encoding="utf-8")
     command, directory = command_for(root, typescript, "typescript", None)
     assert directory == sub
-    assert command == "npm test"
+    assert command == ["npm", "test"]
 
     (sub / "Cargo.toml").write_text("[package]\nname='demo'\n", encoding="utf-8")
     rust = sub / "src" / "lib.rs"
     rust.write_text("fn place() -> i32 { 1 }\n", encoding="utf-8")
     command, directory = command_for(root, rust, "rust", None)
     assert directory == sub
-    assert command == "cargo test"
+    assert command == ["cargo", "test"]
 
     (sub / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
     go = sub / "pkg" / "widget.go"
@@ -328,14 +329,14 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     go.write_text("package pkg\nfunc Run() int { return 1 }\n", encoding="utf-8")
     command, directory = command_for(root, go, "go", None)
     assert directory == sub
-    assert command == "go test -count=1 ./pkg"
+    assert command == ["go", "test", "-count=1", "./pkg"]
 
     (sub / "pyproject.toml").write_text("[project]\ndependencies=['pytest']\n", encoding="utf-8")
     python = sub / "app.py"
     python.write_text("def place():\n    return 1\n", encoding="utf-8")
     command, directory = command_for(root, python, "python", None)
     assert directory == sub
-    assert command.endswith("-m pytest")
+    assert command[-2:] == ["-m", "pytest"]
 
     result = CommandRunner().run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.4)
     assert result.timed_out is True
@@ -398,28 +399,93 @@ def test_help_and_conflicts_use_different_streams(capsys):
     assert captured.out == ""
 
 
-def test_git_status_keeps_short_names_renames_and_the_failure_text(monkeypatch, tmp_path, capsys):
-    class Result:
-        def __init__(self, code, out="", err=""):
-            self.returncode = code
-            self.stdout = out
-            self.stderr = err
+def _init_repo(path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], cwd=path, check=True)
 
-    def fail(*args, **kwargs):
-        return Result(1, err="boom\n")
+
+def _commit(path: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=path, check=True, capture_output=True)
+
+
+def test_git_status_keeps_real_names_and_fails_closed(tmp_path, capsys):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    code = run(["--changed", "--root", str(outside)])
+    captured = capsys.readouterr()
+    assert code == 128
+    assert "not a git repository" in captured.err
+    assert "No source files" not in captured.out
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    source = "def place(x):\n    return x > 0\n"
+    keep = repo / "src" / "café.py"
+    keep.parent.mkdir()
+    keep.write_text(source, encoding="utf-8")
+    nested = repo / "fresh" / "nested" / "new.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(source, encoding="utf-8")
+    spaced = repo / "src" / "my file.py"
+    spaced.write_text(source, encoding="utf-8")
+    gone = repo / "gone.py"
+    gone.write_text(source, encoding="utf-8")
+    old = repo / "src" / "old.py"
+    old.write_text(source, encoding="utf-8")
+    _commit(repo, "base")
+    keep.write_text(source + "\n", encoding="utf-8")
+    nested.write_text(source + "\n", encoding="utf-8")
+    spaced.write_text(source + "\n", encoding="utf-8")
+    gone.unlink()
+    subprocess.run(
+        ["git", "mv", "src/old.py", "src/new.py"], cwd=repo, check=True, capture_output=True
+    )
+    skipped = repo / "target" / "skip.py"
+    skipped.parent.mkdir()
+    skipped.write_text(source, encoding="utf-8")
+
+    found = set(_changed_files(repo))
+    assert keep.resolve() in found
+    assert nested.resolve() in found
+    assert spaced.resolve() in found
+    assert (repo / "src" / "new.py").resolve() in found
+    assert gone.resolve() not in found
+    assert old.resolve() not in found
+
+    chosen = select_files(parse_args(["--root", str(repo), "--changed"]))
+    assert skipped.resolve() not in chosen
+    assert keep.resolve() in chosen
+    code = run(["--scan", "--no-coverage", "--root", str(repo), "--changed"])
+    assert code == 0
+    assert "café.py" in capsys.readouterr().out
+
+
+def test_changed_from_a_subdirectory_stays_inside_it(tmp_path):
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    (sub / "src").mkdir(parents=True)
+    (repo / "src").mkdir()
+    _init_repo(repo)
+    below = sub / "src" / "below.py"
+    above = repo / "src" / "above.py"
+    body = "def place(x):\n    return x > 0\n"
+    below.write_text(body, encoding="utf-8")
+    above.write_text(body, encoding="utf-8")
+    chosen = select_files(parse_args(["--root", str(sub), "--changed"]))
+    assert chosen == [below.resolve()]
+
+
+def test_an_empty_git_error_uses_the_fallback_text(monkeypatch, tmp_path):
+    def fail(args, **kwargs):
+        return subprocess.CompletedProcess(args, 128, b"", b"   \n")
 
     monkeypatch.setattr("mutator.cli.subprocess.run", fail)
-    assert _changed_files(tmp_path) == []
-    assert capsys.readouterr().err.strip() == "boom"
-
-    def status(*args, **kwargs):
-        return Result(0, out="?? a\nR  src/old.py -> src/new.py\n")
-
-    monkeypatch.setattr("mutator.cli.subprocess.run", status)
-    found = _changed_files(tmp_path)
-    assert (tmp_path / "a").resolve() in found
-    assert (tmp_path / "src" / "new.py").resolve() in found
-    assert (tmp_path / "src" / "old.py").resolve() not in found
+    with pytest.raises(GitStatusError, match="git status failed") as caught:
+        _changed_files(tmp_path)
+    assert caught.value.code == 128
 
 
 def test_selection_joins_the_root_and_skips_unknown_files(tmp_path, capsys):

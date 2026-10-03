@@ -10,7 +10,7 @@ from mutator.functions import form_digests, form_spans, sites_in_file
 from mutator.metrics import load_history, source_key, write_results
 from mutator.model import FormResult, RunResult, Site
 from mutator.report import format_scan
-from mutator.runner import CommandRunner, test_plan
+from mutator.runner import Command, CommandRunner, display_command, test_plan
 from mutator.workers import run_mutants
 
 
@@ -180,7 +180,15 @@ def _warn_many(file_key: str, selected, mutation_warning: int) -> None:
         )
 
 
-def _remember_baseline(baselines, cache_key, runner, command: str, cwd: Path) -> None:
+def _command_key(command: Command) -> tuple[str, ...]:
+    """A hashable identity. A list cannot be a dict key."""
+
+    if isinstance(command, str):
+        return ("sh", command)
+    return ("argv", *command)
+
+
+def _remember_baseline(baselines, cache_key, runner, command: Command, cwd: Path) -> None:
     if cache_key in baselines:
         return
     baseline = runner.run(command, cwd, None)
@@ -191,8 +199,8 @@ def _remember_baseline(baselines, cache_key, runner, command: str, cwd: Path) ->
     baselines[cache_key] = (True, baseline.seconds, "")
 
 
-def _baseline_failure(file_key: str, command: str, tail: str) -> RunResult:
-    message = f"Baseline failed for {file_key}: {command}"
+def _baseline_failure(file_key: str, command: Command, tail: str) -> RunResult:
+    message = f"Baseline failed for {file_key}: {display_command(command)}"
     if tail:
         message = f"{message}\n{tail}"
     return RunResult(path=file_key, forms=[], written=[], baseline_failed=True, baseline_message=message)
@@ -215,7 +223,7 @@ def _apply_selected(
     if not selected:
         return None
     command, cwd = test_plan(root, path, language, test_command)
-    cache_key = (command, str(cwd))
+    cache_key = (_command_key(command), str(cwd))
     _remember_baseline(baselines, cache_key, runner, command, cwd)
     ok, seconds, tail = baselines[cache_key]
     if not ok:
@@ -264,7 +272,7 @@ def mutate_file(
     test_command: str | None,
     timeout_factor: float,
     mutation_warning: int,
-    baselines: dict[tuple[str, str], tuple[bool, float, str]],
+    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]],
     max_workers: int | None = None,
 ) -> RunResult:
     """Mutate one file and write its namespaces into `.metrics/mutate`."""

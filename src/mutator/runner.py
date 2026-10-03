@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+Command = str | list[str]
 
 
 @dataclass(frozen=True)
@@ -59,27 +62,46 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
     environment["PYTHONPATH"] = os.pathsep.join(entries)
 
 
+def display_command(command: Command) -> str:
+    """A shell-looking rendering. A list is quoted so it can be pasted."""
+
+    if isinstance(command, str):
+        return command
+    return " ".join(shlex.quote(part) for part in command)
+
+
 class CommandRunner:
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
 
-    def run(self, command: str, cwd: Path, timeout: float | None) -> CommandResult:
+    def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
+        """Run `command` in `cwd`.
+
+        A list is an argument vector and does not go through a shell, so a
+        path with spaces or metacharacters stays one argument. A string is a
+        command the user typed in `--test-command` or `--coverage-command`.
+        """
+
         if self.verbose:
-            print(f"+ ({cwd}) {command}", file=sys.stderr)
+            print(f"+ ({cwd}) {display_command(command)}", file=sys.stderr)
         started = time.monotonic()
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            text=True,
-            env=environment,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                shell=isinstance(command, str),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+                env=environment,
+            )
+        except OSError as exc:
+            seconds = time.monotonic() - started
+            return CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
         try:
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1
@@ -112,20 +134,20 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _clojure_command(directory: Path) -> str:
+def _clojure_command(directory: Path) -> list[str]:
     deps = directory / "deps.edn"
     bb = directory / "bb.edn"
     if bb.is_file() and not deps.is_file():
         text = _read(bb)
         if "spec" in text:
-            return "bb spec --tag ~no-mutate"
-        return "bb test"
+            return ["bb", "spec", "--tag", "~no-mutate"]
+        return ["bb", "test"]
     text = _read(deps)
     if ":spec" in text and "speclj" in text:
-        return "clj -M:spec --tag ~no-mutate"
+        return ["clj", "-M:spec", "--tag", "~no-mutate"]
     if ":spec" in text:
-        return "clj -M:spec"
-    return "clj -M:test"
+        return ["clj", "-M:spec"]
+    return ["clj", "-M:test"]
 
 
 def _project_interpreter(directory: Path) -> str:
@@ -142,7 +164,7 @@ def _project_interpreter(directory: Path) -> str:
     return sys.executable
 
 
-def _python_command(directory: Path) -> str:
+def _python_command(directory: Path) -> list[str]:
     interpreter = _project_interpreter(directory)
     pyproject = _read(directory / "pyproject.toml")
     if (
@@ -151,12 +173,16 @@ def _python_command(directory: Path) -> str:
         or "pytest" in pyproject
         or (directory / "setup.cfg").is_file() and "pytest" in _read(directory / "setup.cfg")
     ):
-        return f"{interpreter} -m pytest"
-    return f"{interpreter} -m unittest discover"
+        return [interpreter, "-m", "pytest"]
+    return [interpreter, "-m", "unittest", "discover"]
 
 
-def test_plan(root: Path, source: Path, language: str, override: str | None) -> tuple[str, Path]:
-    """The test command and the directory it runs in."""
+def test_plan(root: Path, source: Path, language: str, override: str | None) -> tuple[Command, Path]:
+    """The test command and the directory it runs in.
+
+    A user override stays a shell string. Every generated command is an
+    argument vector, so a package path is one argument.
+    """
 
     root = root.resolve()
     if override:
@@ -166,18 +192,18 @@ def test_plan(root: Path, source: Path, language: str, override: str | None) -> 
         return _clojure_command(directory), directory
     if language == "java":
         directory = nearest(source, "pom.xml", root) or root
-        return "mvn -q test -DexcludeTags=no-mutate", directory
+        return ["mvn", "-q", "test", "-DexcludeTags=no-mutate"], directory
     if language == "go":
         directory = nearest(source, "go.mod", root) or root
         relative = source.resolve().parent.relative_to(directory.resolve())
         package = "." if relative == Path(".") else "./" + relative.as_posix()
-        return f"go test -count=1 {package}", directory
+        return ["go", "test", "-count=1", package], directory
     if language == "typescript":
         directory = nearest(source, "package.json", root) or root
-        return "npm test", directory
+        return ["npm", "test"], directory
     if language == "rust":
         directory = nearest(source, "Cargo.toml", root) or root
-        return "cargo test", directory
+        return ["cargo", "test"], directory
     if language == "python":
         directory = (
             nearest(source, "pyproject.toml", root)
@@ -186,4 +212,4 @@ def test_plan(root: Path, source: Path, language: str, override: str | None) -> 
             or root
         )
         return _python_command(directory), directory
-    return "false", root
+    return ["false"], root

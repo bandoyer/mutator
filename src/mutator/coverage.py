@@ -29,18 +29,32 @@ def _exact(normalized: dict, candidates: list[str]):
     return None
 
 
-def _suffix_hit(key: str, candidates: list[str], suffix_match) -> bool:
-    for candidate in candidates:
-        if suffix_match(key, candidate) or suffix_match(candidate, key):
-            return True
-    return False
+def _parts(path: str) -> tuple[str, ...]:
+    return tuple(part for part in path.split("/") if part)
 
 
-def _by_suffix(normalized: dict, candidates: list[str], suffix_match):
-    for key, value in normalized.items():
-        if _suffix_hit(key, candidates, suffix_match):
-            return value
-    return None
+def _rank(key_parts: tuple[str, ...], sources: list[tuple[str, ...]]) -> tuple[int, int] | None:
+    """How well one report key names one of the source paths.
+
+    Rank `(0, extra)` is a key that ends with the source and may add a prefix.
+    Rank `(1, missing)` is a shorter key that the source path ends with. The
+    smaller rank is the longer shared suffix. Two different keys at the same
+    rank are ambiguous.
+    """
+
+    best: tuple[int, int] | None = None
+    for source in sources:
+        if not source or not key_parts:
+            continue
+        if len(key_parts) >= len(source) and key_parts[-len(source) :] == source:
+            rank = (0, len(key_parts) - len(source))
+        elif len(source) > len(key_parts) and source[-len(key_parts) :] == key_parts:
+            rank = (1, len(source) - len(key_parts))
+        else:
+            continue
+        if best is None or rank < best:
+            best = rank
+    return best
 
 
 def _lookup(index: dict, source_path: str):
@@ -53,7 +67,26 @@ def _lookup(index: dict, source_path: str):
     found = _exact(normalized, candidates)
     if found is not None:
         return found
-    return _by_suffix(normalized, candidates, crapper.coverage.suffix_match)
+    sources: list[tuple[str, ...]] = []
+    for candidate in candidates:
+        parts = _parts(candidate)
+        if parts and parts not in sources:
+            sources.append(parts)
+    best_rank: tuple[int, int] | None = None
+    best: list[tuple[tuple[str, ...], object]] = []
+    for key, value in normalized.items():
+        key_parts = _parts(key)
+        rank = _rank(key_parts, sources)
+        if rank is None:
+            continue
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            best = [(key_parts, value)]
+        elif rank == best_rank:
+            best.append((key_parts, value))
+    if len({parts for parts, _value in best}) != 1:
+        return None
+    return best[0][1]
 
 
 def _covered_from_pairs(lines: dict[int, tuple[int, int]] | None) -> set[int] | None:
@@ -131,8 +164,7 @@ def _jacoco_index(root: Path) -> dict[str, set[int]]:
 def _go_lines(profile, source_path: str) -> set[int] | None:
     if not profile:
         return None
-    crapper = ensure_crapper()
-    segments = crapper.coverage._profile_segments(profile, source_path)
+    segments = _lookup(profile, source_path)
     if segments is None:
         return None
     covered: set[int] = set()

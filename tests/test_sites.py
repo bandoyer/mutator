@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from mutator.functions import form_id, is_private, project_functions, sites_in_file
+from mutator.sites import discover_raw
 
 
 def _sites(tmp_path: Path, relative: str, source: str):
@@ -194,3 +195,11 @@ export function mount(app) {
 def test_a_quoted_nullish_operator_is_not_a_site(tmp_path):
     source = 'export function place() {\n  return "a ?? b?.c";\n}\n'
     assert _sites(tmp_path, "src/demo/app.ts", source) == []
+
+
+def test_a_deep_expression_is_walked(tmp_path):
+    expr = " + ".join(["1"] * 1200)
+    python = f"def place():\n    return {expr}\n"
+    assert discover_raw(python, "python", "app.py")
+    go = f"package p\nfunc place() int {{ return {expr} }}\n"
+    assert discover_raw(go, "go", "app.go")
