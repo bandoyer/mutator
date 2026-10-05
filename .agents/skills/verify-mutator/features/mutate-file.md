@@ -25,5 +25,5 @@ Preconditions:
 
 ## Gotchas
 
-- Without `--no-coverage`, mutator first runs the language's coverage tool. The fixture works either way, but `--no-coverage` is faster.
+- Pass `--no-coverage` with this fixture. Without it, mutator first runs crapper's Python coverage, which collects nothing for a file at the project root such as `demo.py` (bandoyer/crapper#3). Every site is then `UNCOVERED` and no mutant runs. That coverage run uses `python3`, and crapper installs coverage.py into it when it is missing. [Coverage reports](./coverage-reports.md) moves the fixture to `src/` and gives it a `.venv` first.
 - A second run without `--mutate-all` skips mutants already killed and can print nothing new.
