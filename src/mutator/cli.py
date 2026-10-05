@@ -97,7 +97,8 @@ Options:
                                 once. Default: one per core. The run uses the
                                 smaller of this limit, the cores, and the
                                 number of selected sites.
-  --verbose                     Print each test command and each mutant.
+  --verbose                     Print each test command, how it ended, and
+                                each mutant.
 
 Arguments:
   path              File or directory to mutate. Test paths are skipped.

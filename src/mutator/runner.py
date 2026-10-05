@@ -131,7 +131,8 @@ class CommandRunner:
             )
         except OSError as exc:
             seconds = time.monotonic() - started
-            return CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
+            result = CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
+            return self._ended(cwd, result)
         try:
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1
@@ -143,7 +144,15 @@ class CommandRunner:
             timed_out = True
         _end_group(process.pid)
         seconds = time.monotonic() - started
-        return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
+        result = CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
+        return self._ended(cwd, result)
+
+    def _ended(self, cwd: Path, result: CommandResult) -> CommandResult:
+        # Workers run in parallel, so the folder ties this line to its command.
+        if self.verbose:
+            ending = ", timed out" if result.timed_out else ""
+            print(f"= ({cwd}) exit {result.code} in {result.seconds:.1f} s{ending}", file=sys.stderr)
+        return result
 
 
 def nearest(start: Path, marker: str, stop: Path) -> Path | None:

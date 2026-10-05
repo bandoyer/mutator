@@ -230,3 +230,16 @@ def _signal_senders():
 def test_signals_go_only_through_the_group_guard():
     # killpg(1) is kill(-1) on Linux: it reaches every process the user owns.
     assert _signal_senders() == [("runner.py", "_kill_group")]
+
+
+def test_verbose_reports_how_each_command_ended(tmp_path, capsys):
+    runner = CommandRunner(verbose=True)
+    runner.run("exit 3", tmp_path, None)
+    runner.run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.4)
+    runner.run(["/no/such/program"], tmp_path, None)
+
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[1].startswith(f"= ({tmp_path}) exit 3 in ")
+    assert lines[3].startswith(f"= ({tmp_path}) exit 124 in ")
+    assert lines[3].endswith(" s, timed out")
+    assert lines[5].startswith(f"= ({tmp_path}) exit 127 in ")
