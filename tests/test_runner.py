@@ -1,6 +1,9 @@
+import signal
 import sys
 
-from mutator.runner import CommandRunner, _clojure_command, _python_command, nearest
+import pytest
+
+from mutator.runner import CommandRunner, _clojure_command, _kill_group, _python_command, nearest
 from mutator.runner import test_plan as plan_command
 
 
@@ -153,3 +156,14 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"
+
+
+def test_only_a_group_the_command_leads_is_signalled(monkeypatch):
+    sent = []
+    monkeypatch.setattr("mutator.runner.os.killpg", lambda group, sig: sent.append((group, sig)))
+    for group in (1, 0, -7):
+        with pytest.raises(ValueError):
+            _kill_group(group)
+    assert sent == []
+    _kill_group(4242)
+    assert sent == [(4242, signal.SIGKILL)]

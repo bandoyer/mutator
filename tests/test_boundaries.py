@@ -346,7 +346,7 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
 def test_a_process_without_a_return_code_counts_as_failure(monkeypatch, tmp_path):
     class Proc:
         returncode = None
-        pid = 1
+        pid = 2**22 + 1  # above the highest pid Linux allows, so no signal reaches a process
 
         def communicate(self, timeout=None):
             return (None, None)
