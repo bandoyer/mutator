@@ -27,5 +27,5 @@ This folder is the maintained source for verifying what a mutator user sees. Rea
 - [Control runs](./control-run.md) covers each worker's run of the unmutated tests before its first mutant: a cold worker build doesn't turn mutants into timeouts, and a worker whose unmutated tests fail stops the run.
 - [A project's measure script](./project-measure.md) covers a real project's own script that calls mutator, such as bujo's `scripts/measure`.
 - [Run time limit](./run-time-limit.md) covers `--baseline-timeout`: a baseline or control run that hangs stops the file with exit code 2 and leaves no test process running.
-- [Number options](./number-options.md) covers rejecting `0`, `inf`, and `nan` for every number option before any test runs, and the placeholders `--help` shows.
+- [Number options](./number-options.md) covers rejecting `0`, `inf`, `nan`, and text that isn't a number for every number option before any test runs, a huge finite timeout that runs to the end, and the placeholders `--help` shows.
 - [Source safety](./source-safety.md) covers an edit saved to the source while mutants run, and a backup left under `target/mutator-backup/` by an older run: deleted when it equals its source, and a stop with exit code `1` when it differs.

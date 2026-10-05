@@ -1,4 +1,5 @@
 import ast
+import math
 import shlex
 import signal
 import sys
@@ -180,6 +181,14 @@ def test_nothing_the_command_started_outlives_the_run(tmp_path):
     assert result.code == 0
     time.sleep(0.6)
     assert not late.exists()
+
+
+def test_a_timeout_longer_than_poll_accepts_still_runs_the_command(tmp_path):
+    # poll() takes at most 2**31 - 1 ms, about 24.8 days. --baseline-timeout 1e7
+    # passes 1e7 s, and a 3 s baseline times --timeout-factor 1e308 is inf.
+    for timeout in (1e7, math.inf):
+        result = CommandRunner().run("sleep 0.2", tmp_path, timeout)
+        assert (result.code, result.timed_out) == (0, False), timeout
 
 
 def test_the_run_waits_until_the_group_is_gone(monkeypatch):
