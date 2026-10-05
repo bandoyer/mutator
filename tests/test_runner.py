@@ -1,5 +1,6 @@
 import signal
 import sys
+import time
 
 import pytest
 
@@ -167,3 +168,12 @@ def test_only_a_group_the_command_leads_is_signalled(monkeypatch):
     assert sent == []
     _kill_group(4242)
     assert sent == [(4242, signal.SIGKILL)]
+
+
+def test_nothing_the_command_started_outlives_the_run(tmp_path):
+    late = tmp_path / "late.txt"
+    command = f"(sleep 0.3; echo late > {late}) >/dev/null 2>&1 &"
+    result = CommandRunner().run(command, tmp_path, 5)
+    assert result.code == 0
+    time.sleep(0.6)
+    assert not late.exists()

@@ -75,6 +75,23 @@ def _kill_group(group: int) -> None:
     os.killpg(group, signal.SIGKILL)
 
 
+def _end_group(group: int, patience: float = 5.0) -> None:
+    """Kill what the command left in its process group, and wait until it is gone.
+
+    A worker is removed as soon as its command returns. A process still running
+    there can add a file while the folder is being removed. A background child
+    does that, and so does a rustc that has been sent SIGKILL but not yet exited.
+    """
+
+    deadline = time.monotonic() + patience
+    while time.monotonic() < deadline:
+        try:
+            _kill_group(group)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+
+
 def display_command(command: Command) -> str:
     """A shell-looking rendering. A list is quoted so it can be pasted."""
 
@@ -124,6 +141,7 @@ class CommandRunner:
             output, _err = process.communicate()
             code = 124
             timed_out = True
+        _end_group(process.pid)
         seconds = time.monotonic() - started
         return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
 
