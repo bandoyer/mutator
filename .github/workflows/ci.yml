@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # mutator imports crapper from a checkout next to it.
+      - uses: actions/checkout@v4
+        with:
+          path: mutator
+      - uses: actions/checkout@v4
+        with:
+          repository: bandoyer/crapper
+          path: crapper
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install -e "./mutator[dev]"
+      - run: python -m pytest -q
+        working-directory: mutator
