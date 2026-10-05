@@ -13,6 +13,11 @@ from pathlib import Path
 
 Command = str | list[str]
 
+# poll() takes at most 2**31 - 1 ms, about 24.8 days, and a longer timeout
+# raises OverflowError inside communicate() while the command keeps running.
+# A huge --timeout-factor or --baseline-timeout gets this bound instead.
+LONGEST_TIMEOUT = 2_000_000.0
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -133,6 +138,8 @@ class CommandRunner:
             seconds = time.monotonic() - started
             result = CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
             return self._ended(cwd, result)
+        if timeout is not None:
+            timeout = min(timeout, LONGEST_TIMEOUT)
         try:
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1

@@ -171,19 +171,22 @@ def _take(args: list[str], index: int, option: str) -> str:
 
 
 def _positive(value: str, option: str) -> float:
-    number = float(value)
+    try:
+        number = float(value)
+    except ValueError:
+        number = math.nan
     if not 0 < number < math.inf:
         raise ValueError(f"{option} requires a finite positive number")
     return number
 
 
-def _workers(value: str) -> int:
+def _integer(value: str, option: str, least: int, wanted: str) -> int:
     try:
         count = int(value)
     except ValueError:
-        raise ValueError("--max-workers requires a positive integer") from None
-    if count < 1:
-        raise ValueError("--max-workers requires a positive integer")
+        count = least - 1
+    if count < least:
+        raise ValueError(f"{option} requires {wanted}")
     return count
 
 
@@ -193,7 +196,10 @@ def _lines(value: str) -> set[int]:
         piece = piece.strip()
         if not piece:
             continue
-        number = int(piece)
+        try:
+            number = int(piece)
+        except ValueError:
+            number = 0
         if number < 1:
             raise ValueError("--lines requires positive line numbers")
         found.add(number)
@@ -236,11 +242,11 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 index += 2
                 continue
             if arg == "--mutation-warning":
-                options.mutation_warning = int(_take(args, index, arg))
+                options.mutation_warning = _integer(_take(args, index, arg), arg, 0, "an integer of 0 or more")
                 index += 2
                 continue
             if arg == "--max-workers":
-                options.max_workers = _workers(_take(args, index, arg))
+                options.max_workers = _integer(_take(args, index, arg), arg, 1, "a positive integer")
                 index += 2
                 continue
             if arg == "--lines":

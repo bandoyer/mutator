@@ -406,6 +406,19 @@ def test_every_number_option_in_the_help_rejects_zero_and_values_that_are_not_fi
     assert parse_args(["--mutation-warning", "0"]).mutation_warning == 0
 
 
+def test_every_number_option_in_the_help_names_itself_for_text_that_is_not_a_number():
+    numbers = re.findall(r"^  (--[\w-]+) <(?:number|seconds|count|n,n,\.\.\.)>", HELP, re.MULTILINE)
+    expected = {"--timeout-factor", "--baseline-timeout", "--mutation-warning", "--max-workers", "--lines"}
+    assert expected <= set(numbers)
+    for option in numbers:
+        for value in ["abc", "1.5x"]:
+            options = parse_args([option, value])
+            assert options.exit_code == 1, (option, value)
+            assert options.message.startswith(f"{option} requires"), (option, value)
+    assert parse_args(["--lines", "1,abc"]).message.startswith("--lines requires")
+    assert parse_args(["--mutation-warning", "1.5"]).message.startswith("--mutation-warning requires")
+
+
 def test_help_and_conflicts_use_different_streams(capsys):
     assert run(["--help"]) == 0
     captured = capsys.readouterr()
