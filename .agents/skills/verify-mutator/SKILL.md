@@ -36,9 +36,10 @@ project=$($vm project ~/Work/bujo)           # or a fresh git clone of a real pr
 $vm drive "$project" <transcript> --no-coverage demo.py
 $vm exec "$project" <transcript> scripts/measure
 $vm signal "$project" <transcript> TERM 3 --no-coverage demo.py   # send SIGTERM (or INT, as Ctrl-C) 3 s in
+$vm trace "$project" <transcript> --no-coverage demo.py      # drive under strace, and list group signals sent after a reap
 ```
 
-`drive` runs this checkout's `./mutator <args...>` with the project as the working directory, exactly as a user would type it there. `exec` runs any project command the same way, such as a measure script that calls mutator. `signal` runs `./mutator` like `drive`, then sends it SIGTERM or SIGINT after the given seconds, through `timeout -k 2 --preserve-status`: the exit code is mutator's own, and `137` means it was still running 2 s after the signal. All three append one block to `<transcript>` and also print it:
+`drive` runs this checkout's `./mutator <args...>` with the project as the working directory, exactly as a user would type it there. `exec` runs any project command the same way, such as a measure script that calls mutator. `signal` runs `./mutator` like `drive`, then sends it SIGTERM or SIGINT after the given seconds, through `timeout -k 2 --preserve-status`: the exit code is mutator's own, and `137` means it was still running 2 s after the signal. `trace` runs `./mutator` like `drive`, under `strace -f`, and adds a section listing each signal mutator sent to a test command's group after it had reaped that group's leader (`(none)` when the order is right). It needs `strace`. All four append one block to `<transcript>` and also print it:
 
 - the command, the date and time, the mutator commit, and the exit code
 - stdout and stderr
@@ -67,4 +68,4 @@ This removes only a scratch folder that `$vm project` created (`$TMPDIR/mutator-
 
 ## Helpers
 
-`bin/verify-mutator` subcommands: `doctor`, `project fixture | cold-build | <git repo>`, `drive <project> <transcript> [mutator args...]`, `exec <project> <transcript> <command> [args...]`, `signal <project> <transcript> TERM|INT <seconds> [mutator args...]`, `cleanup <project>`. Running it with no arguments prints usage.
+`bin/verify-mutator` subcommands: `doctor`, `project fixture | cold-build | <git repo>`, `drive <project> <transcript> [mutator args...]`, `exec <project> <transcript> <command> [args...]`, `signal <project> <transcript> TERM|INT <seconds> [mutator args...]`, `trace <project> <transcript> [mutator args...]`, `cleanup <project>`. Running it with no arguments prints usage.

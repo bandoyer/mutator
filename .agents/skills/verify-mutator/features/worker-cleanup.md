@@ -2,7 +2,7 @@
 
 Each file's mutants run in worker folders under `target/mutation-workers/run-<id>/worker-<n>`. When the file's mutants finish, mutator removes the whole `run-<id>` folder. The run must not crash while removing it, even when the test command started a process that is still writing in the worker.
 
-When mutator gets SIGTERM (what `timeout` and `kill` send) or Ctrl-C, it stops every test command it is running and removes the folder before it exits. To stop a command, it sends SIGTERM to the command's process group, waits up to 1 s, then sends SIGKILL. A mutator run nested in a test command therefore gets the same chance to clean up. SIGKILL to mutator itself can't be caught, so after it the folder and the test commands stay.
+When mutator gets SIGTERM (what `timeout` and `kill` send) or Ctrl-C, it stops every test command it is running and removes the folder before it exits. To stop a command, it sends SIGTERM to the command's process group, waits up to 1 s, then sends SIGKILL. mutator reaps a command's leader only after it has sent SIGKILL to the rest of its group, so it never signals a group id that may already belong to someone else (issue #44). A mutator run nested in a test command therefore gets the same chance to clean up. SIGKILL to mutator itself can't be caught, so after it the folder and the test commands stay.
 
 ## Sub-features
 
@@ -10,6 +10,8 @@ When mutator gets SIGTERM (what `timeout` and `kill` send) or Ctrl-C, it stops e
 - `cleanup-leftover-process` finishes without `OSError: Directory not empty` when the test command leaves a process writing in the worker's `target/debug/deps`, and leaves no worker folder.
 - `cleanup-sigterm` stops the test command and removes the folder when mutator gets SIGTERM during a worker's run, and exits `143`.
 - `cleanup-ctrl-c` does the same for Ctrl-C (SIGINT), during the baseline and during a worker's run.
+- `cleanup-order` sends no signal to a test command's group after mutator has reaped that group's leader, for a normal run, a test command that leaves a background process, and a baseline timeout.
+- `cleanup-ctrl-c-held` stops a background process that still holds the test command's output when Ctrl-C comes after the command's shell has exited: during the baseline, and during a timeout's 1 s grace.
 - `cleanup-nested-timeout` lets a mutator run nested in a test command clean up when the outer run's timeout stops that command (issue #21).
 
 ## How to get to it (user POV)
@@ -38,6 +40,17 @@ Preconditions:
   - During the baseline: `$vm signal "$project" "$T" INT 3 --no-coverage --mutate-all --max-workers 1 --test-command 'sleep 30' demo.py`.
 
   Pass for both: exit code `130`, stderr ends with Python's `KeyboardInterrupt`, worker folders `(none)`, and processes left `(none)`. The bug shows as `sleep 30` left behind, and, during a worker's run, as exit code `137`: mutator hung waiting for the worker until the SIGKILL.
+- **cleanup-order.** Three drives, each with a fresh fixture project, through `$vm trace`, which runs `./mutator` under `strace -f` and lists each group signal sent after the wait that reaped that group's leader:
+  - `$vm trace "$project" "$T" --no-coverage --mutate-all --max-workers 1 demo.py`. Exit code `0`.
+  - `$vm trace "$project" "$T" --no-coverage --mutate-all --max-workers 1 --test-command '(sleep 0.3; touch late) >/dev/null 2>&1 &' demo.py`. Exit code `3`. Then no `late` file in the project or a worker.
+  - `$vm trace "$project" "$T" --no-coverage --mutate-all --max-workers 1 --baseline-timeout 1 --test-command 'sleep 30' demo.py`. Exit code `2`.
+
+  Pass for each: the section `group signals sent after their leader was reaped` says `(none)` under a nonzero count of group signals, worker folders `(none)`, and processes left `(none)`. The bug shows as `kill(-<pid>, SIGKILL)` lines in that section, one or more per test command.
+- **cleanup-ctrl-c-held.** Two drives, each with a fresh fixture project. The test command's shell exits at once, but its background `sleep 30` keeps the output pipe open:
+  - During the baseline: `$vm signal "$project" "$T" INT 2 --no-coverage --mutate-all --max-workers 1 --test-command 'case "$PWD" in *mutation-workers*) exit 0;; esac; sleep 30 & exit 0' demo.py`.
+  - During the timeout's grace: the shell exits on SIGTERM, and its background sleep ignores SIGTERM. `$vm signal "$project" "$T" INT 1.6 --no-coverage --mutate-all --max-workers 1 --baseline-timeout 1 --test-command "case \"\$PWD\" in *mutation-workers*) exit 0;; esac; trap 'exit 0' TERM; (trap '' TERM; exec sleep 30) & wait" demo.py`.
+
+  Pass for both: exit code `130`, worker folders `(none)`, and processes left `(none)`. The bug shows as `sleep 30` in processes left.
 - **cleanup-nested-timeout.** The outer test command runs a second mutator on the outer worker. The inner control run keeps writing files in the inner worker, so the outer control run hangs until `--baseline-timeout 3` stops it:
 
   ```bash
@@ -51,6 +64,8 @@ Preconditions:
   Run it from the repo root, so `$PWD/mutator` is this checkout's launcher. Pass: exit code `2`, stderr says `Unmutated tests timed out after 3 s in a mutation worker for demo.py`, no traceback, worker folders `(none)`, and processes left `(none)`. The bug shows as exit code `1` with `OSError: [Errno 39] Directory not empty: '.../worker-0/target/mutation-workers/run-<id>/worker-0'`, a `run-<id>` folder, and `sh .../inner.sh` left running.
 
 ## Gotchas
+
+- `trace` needs `strace`; without it the subcommand stops and names the package to install. Where ptrace is blocked (some agent sandboxes), strace records nothing; `trace` then says so and exits 1, so a blocked trace never reads as `(none)`. Run it inside `bin/sandbox`, like every drive.
 
 - Run each signal or nested recipe inside one `bin/sandbox` call. A test command left behind stops by itself after 30 s, and the sandbox ends it sooner. The transcript's `processes left` section is written before the sandbox ends, so it is the check.
 - `signal` gives mutator's own exit code. A mutator that a signal killed outright (the bug) shows as `128 +` the signal, the same `143` as a clean SIGTERM exit, so judge `cleanup-sigterm` by the folders and processes left, not the code alone.

@@ -11,14 +11,15 @@ from pathlib import Path
 import pytest
 from conftest import wait_until
 
+import mutator.runner as runner_module
 from mutator.runner import (
     CommandRunner,
     Stopped,
+    _Command,
     _clojure_command,
-    _end_group,
     _kill_group,
     _python_command,
-    _signal_group,
+    _wait_until_gone,
     nearest,
 )
 from mutator.runner import test_plan as plan_command
@@ -208,25 +209,25 @@ def test_a_timeout_longer_than_poll_accepts_still_runs_the_command(tmp_path):
 def test_the_run_waits_until_the_group_is_gone(monkeypatch):
     signals = []
 
-    def kill_group(group):
-        signals.append(group)
+    def kill_group(group, sig):
+        signals.append((group, sig))
         if len(signals) == 3:
             raise ProcessLookupError
 
     monkeypatch.setattr("mutator.runner._kill_group", kill_group)
     monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
-    _end_group(4242)
-    assert signals == [4242, 4242, 4242]
+    _wait_until_gone(4242, 5.0)
+    assert signals == [(4242, 0)] * 3
 
 
 def test_the_wait_for_the_group_gives_up_at_the_deadline(monkeypatch):
     signals = []
     clock = iter([0.0, 1.0, 4.0, 5.0])
-    monkeypatch.setattr("mutator.runner._kill_group", signals.append)
+    monkeypatch.setattr("mutator.runner._kill_group", lambda group, sig: signals.append((group, sig)))
     monkeypatch.setattr("mutator.runner.time.monotonic", lambda: next(clock))
     monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
-    _end_group(4242, patience=5.0)
-    assert signals == [4242, 4242]
+    _wait_until_gone(4242, patience=5.0)
+    assert signals == [(4242, 0)] * 2
 
 
 OTHER_SENDERS = ("send_signal", "terminate", "pthread_kill", "raise_signal", "pidfd_send_signal")
@@ -286,17 +287,115 @@ def test_ctrl_c_stops_the_command_it_interrupts(tmp_path, ctrl_c_when):
     assert not late.exists()
 
 
-def test_ctrl_c_does_not_wait_for_what_a_finished_command_left_holding_its_output(tmp_path, ctrl_c_when):
-    # The shell exits at once; its background sleep keeps the output pipe open.
-    # Python's own Ctrl-C handling then reaps the shell, so its group is no longer
-    # known to be the command's, and the run must not wait for the sleep.
+def test_ctrl_c_stops_what_a_finished_command_left_holding_its_output(tmp_path, ctrl_c_when):
+    # Issue #44: the shell exits at once; its background child keeps the output
+    # pipe open. The leader stays unreaped, so its group can still be stopped.
     started = tmp_path / "started"
+    late = tmp_path / "late"
     ctrl_c_when(started)
 
     with pytest.raises(KeyboardInterrupt):
-        CommandRunner().run(f"touch {started}; sleep 3 & exit 0", tmp_path, None)
+        CommandRunner().run(f"(sleep 1; touch {late}) & touch {started}; exit 0", tmp_path, None)
 
     assert time.time() - started.stat().st_mtime < 2.0
+    wait_until(started, 1.5)
+    assert not late.exists()
+
+
+def test_ctrl_c_during_the_grace_stops_what_holds_the_output(tmp_path, ctrl_c_when):
+    # The shell exits on SIGTERM; its background child ignores SIGTERM and holds the output.
+    graced = tmp_path / "graced"
+    late = tmp_path / "late"
+    ctrl_c_when(graced)
+    command = f"trap 'touch {graced}; exit 0' TERM; (trap '' TERM; sleep 1; touch {late}) & wait"
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner().run(command, tmp_path, 0.3)
+
+    wait_until(graced, 1.5)
+    assert not late.exists()
+
+
+WAITID = os.waitid
+
+
+@pytest.fixture
+def group_signals(monkeypatch):
+    """Each signal other than 0 sent to a group, as (signal, whether its leader was already reaped)."""
+
+    sent = []
+    real = runner_module._kill_group
+
+    def spy(group, sig=signal.SIGKILL):
+        if sig != 0:
+            try:
+                WAITID(os.P_PID, group, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                sent.append((sig, False))
+            except ChildProcessError:
+                sent.append((sig, True))
+        real(group, sig)
+
+    monkeypatch.setattr("mutator.runner._kill_group", spy)
+    return sent
+
+
+@pytest.mark.parametrize(
+    "command, timeout",
+    [
+        ("true", 5),
+        ("(sleep 0.3; touch {late}) >/dev/null 2>&1 &", 5),
+        ("sleep 30", 0.3),
+    ],
+    ids=["exits", "leaves-a-process", "times-out"],
+)
+def test_a_group_is_signalled_only_while_its_leader_is_unreaped(tmp_path, group_signals, command, timeout):
+    # Issue #44: once the leader is reaped, its number may name another group.
+    late = tmp_path / "late"
+    CommandRunner().run(command.format(late=late), tmp_path, timeout)
+
+    assert (signal.SIGKILL, False) in group_signals
+    assert [sig for sig, reaped in group_signals if reaped] == []
+    time.sleep(0.5)
+    assert not late.exists()
+
+
+def _interrupt_after_the_reap(monkeypatch):
+    """Raise SystemExit, as mutator's SIGTERM handler does, just after a waitpid reaps a child."""
+
+    real = os.waitpid
+    fired = []
+
+    def waitpid(pid, options):
+        reaped = real(pid, options)
+        if reaped[0] > 0 and not fired:
+            fired.append(reaped[0])
+            raise SystemExit(143)
+        return reaped
+
+    monkeypatch.setattr(os, "waitpid", waitpid)
+    monkeypatch.setattr(subprocess._del_safe, "waitpid", waitpid)
+    return fired
+
+
+def test_without_waitid_an_interrupted_reap_is_never_signalled(tmp_path, group_signals, monkeypatch):
+    # macOS before Python 3.13: the leader's exit can only be seen by reaping it.
+    fired = _interrupt_after_the_reap(monkeypatch)
+    monkeypatch.delattr(os, "waitid")
+
+    with pytest.raises(SystemExit):
+        CommandRunner().run("true", tmp_path, 5)
+
+    assert fired
+    assert [sig for sig, reaped in group_signals if reaped] == []
+
+
+def test_without_waitid_a_timed_out_command_is_still_stopped(tmp_path, group_signals, monkeypatch):
+    monkeypatch.delattr(os, "waitid")
+    result = CommandRunner().run("sleep 30", tmp_path, 0.3)
+
+    assert result.timed_out
+    assert (signal.SIGTERM, False) in group_signals
+    assert [sig for sig, reaped in group_signals if reaped] == []
 
 
 def test_ctrl_c_during_the_grace_kills_the_command_at_once(tmp_path, ctrl_c_when):
@@ -337,7 +436,7 @@ class SlowCommand:
         self.now = 0.0
         self.waits = []
 
-    def communicate(self, timeout):
+    def wait(self, timeout):
         self.waits.append(timeout)
         assert len(self.waits) < 10, self.waits
         self.now += timeout
@@ -405,30 +504,69 @@ def test_stop_after_a_command_finished_signals_nothing_and_starts_nothing(monkey
 
 
 def test_a_reaped_leader_is_never_signalled(monkeypatch):
+    finished = _Command(subprocess.Popen(["true"], stdout=subprocess.PIPE, start_new_session=True, text=True))
+    finished.wait(5)
+    assert finished.end() == 0
     sent = []
     monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
-    finished = subprocess.Popen(["true"], start_new_session=True)
-    finished.wait()
-    behind_popens_back = subprocess.Popen(["true"], start_new_session=True)
-    os.waitpid(behind_popens_back.pid, 0)  # reaped, but returncode stays None
 
-    assert _signal_group(finished, signal.SIGTERM) is False
-    assert _signal_group(behind_popens_back, signal.SIGTERM) is False
-
-    assert behind_popens_back.returncode is None
+    assert finished.signal(signal.SIGTERM) is False
     assert sent == []
 
 
 def test_an_unreaped_leader_is_signalled_with_or_without_waitid(monkeypatch):
     sent = []
     monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
-    running = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    process = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True, text=True)
+    running = _Command(process)
     try:
-        assert _signal_group(running, signal.SIGTERM) is True
+        assert running.signal(signal.SIGTERM) is True
         monkeypatch.delattr("mutator.runner.os.waitid")  # macOS before Python 3.13
-        assert _signal_group(running, signal.SIGKILL) is True
+        with pytest.raises(subprocess.TimeoutExpired):
+            running.wait(0.05)  # reaps nothing while the leader runs
+        assert running.signal(signal.SIGKILL) is True
     finally:
-        running.kill()
-        running.wait()
+        process.kill()
+        process.wait()
+        process.stdout.close()
 
-    assert sent == [(running.pid, signal.SIGTERM), (running.pid, signal.SIGKILL)]
+    assert sent == [(process.pid, signal.SIGTERM), (process.pid, signal.SIGKILL)]
+
+
+def test_the_output_and_the_exit_code_wait_for_each_other(tmp_path):
+    # The leader exits before a child it left writes the rest of the output.
+    held = CommandRunner().run("(sleep 0.2; echo late) & echo early", tmp_path, 5)
+    assert held.output == "early\nlate\n"
+    # The leader closes its output long before it exits.
+    closed = CommandRunner().run("echo early; exec >&-; sleep 0.2; exit 3", tmp_path, 5)
+    assert (closed.code, closed.output) == (3, "early\n")
+
+
+def test_a_wait_with_no_time_left_times_out_without_reading(monkeypatch):
+    process = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True, text=True)
+    command = _Command(process)
+    monkeypatch.setattr("mutator.runner.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr(command, "_read", lambda seconds: pytest.fail("read with no time left"))
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            command.wait(0)
+    finally:
+        monkeypatch.undo()
+        command.end()
+
+
+def test_after_the_output_ends_the_exit_is_polled_with_a_doubling_delay(monkeypatch):
+    process = subprocess.Popen(["true"], stdout=subprocess.PIPE, start_new_session=True, text=True)
+    command = _Command(process)
+    command.wait(5)
+    exits = iter([False] * 8 + [True])
+    sleeps = []
+    monkeypatch.setattr(command, "_exited", lambda: next(exits))
+    monkeypatch.setattr("mutator.runner.time.sleep", sleeps.append)
+    try:
+        command.wait(5)
+    finally:
+        monkeypatch.undo()
+        command.end()
+
+    assert sleeps == [0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.05, 0.05]

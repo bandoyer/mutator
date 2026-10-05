@@ -344,21 +344,6 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     assert result.code == 124
 
 
-def test_a_process_without_a_return_code_counts_as_failure(monkeypatch, tmp_path):
-    class Proc:
-        returncode = None
-        pid = 2**22 + 1  # above the highest pid Linux allows, so no signal reaches a process
-
-        def communicate(self, timeout=None):
-            return (None, None)
-
-    monkeypatch.setattr("mutator.runner.subprocess.Popen", lambda *args, **kwargs: Proc())
-    result = CommandRunner().run("true", tmp_path, 5)
-    assert result.code == 1
-    assert result.output == ""
-    assert result.timed_out is False
-
-
 def test_options_reject_bad_values_and_keep_flag_defaults(monkeypatch):
     assert _take(["--root", "/tmp", "extra"], 0, "--root") == "/tmp"
     assert _take(["--root", "value", ""], 0, "--root") == "value"
