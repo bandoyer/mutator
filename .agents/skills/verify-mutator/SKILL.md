@@ -42,6 +42,7 @@ $vm exec "$project" <transcript> scripts/measure
 - the command, the date and time, the mutator commit, and the exit code
 - stdout and stderr
 - the folders left in `target/mutation-workers` (`(none)` when cleanup worked)
+- the processes still running with a working directory in the project (`(none)` when every test command was stopped)
 - tracked files changed in the project (`(none)` when mutator left the source alone)
 
 Both set `MISE_TRUSTED_CONFIG_PATHS` to the project, so a cloned project's `mise.toml` works in the clone and in its workers. Both set `MEASURE_TOOLS` to a folder in the scratch area that links `mutator` to this checkout, and `crapper` and `dryer` to their checkouts next to it. A measure script that reads `MEASURE_TOOLS` therefore runs the mutator under test, not another copy.
@@ -51,7 +52,7 @@ The features you can drive, and the end state that proves each one, are in [feat
 ## Evidence
 
 - Put transcripts where the caller asks, for example `<run folder>/artifacts/verify/round-1/criterion-1.txt`. Never put them inside the scratch project: cleanup removes it.
-- Proof is the transcript: the action (command), what the user saw (stdout, stderr, exit code), and the side effects (worker folders left, tracked files changed). Check all three.
+- Proof is the transcript: the action (command), what the user saw (stdout, stderr, exit code), and the side effects (worker folders left, processes left, tracked files changed). Check all three.
 - Use the real user path only: the `./mutator` launcher with real arguments, or the project's own script. Don't import `mutator` in Python, and don't treat `pytest` as proof.
 - Exit codes: `0` every executed mutant was killed, `2` the baseline failed, `3` a mutant survived. A Python traceback exits `1`.
 

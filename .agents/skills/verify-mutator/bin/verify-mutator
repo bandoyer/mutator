@@ -56,6 +56,17 @@ write_cold_build() {
   git -C "$project" -c user.name=verify -c user.email=verify@localhost commit -qm cold-build
 }
 
+# Lists processes still running with a working directory in the project, such as
+# a test command mutator didn't stop. A worker folder already removed still counts.
+leftover_processes() {
+  local project=$1 entry cwd
+  for entry in /proc/[0-9]*; do
+    cwd=$(readlink "$entry/cwd" 2>/dev/null) || continue
+    [[ $cwd == "$project" || $cwd == "$project/"* ]] || continue
+    echo "${entry#/proc/} $(tr '\0' ' ' <"$entry/cmdline" 2>/dev/null)"
+  done
+}
+
 # Runs "$@" in the project and appends the action, what the user saw, and the state left behind.
 record() {
   local project=$1 transcript=$2 shown=$3
@@ -76,6 +87,8 @@ record() {
     echo "--- stderr"; cat "$err"
     echo "--- worker folders left in target/mutation-workers"
     find "$project/target/mutation-workers" -mindepth 1 -maxdepth 1 2>/dev/null | sed "s|^$project/||" | grep . || echo "(none)"
+    echo "--- processes left in the project"
+    leftover_processes "$project" | grep . || echo "(none)"
     echo "--- tracked files changed (git status --short)"
     git -C "$project" status --short --untracked-files=no | grep . || echo "(none)"
     echo
