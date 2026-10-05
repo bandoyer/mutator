@@ -18,21 +18,24 @@ from mutator.workers import WorkerFailed, run_mutants
 BASELINE_TIMEOUT = 600.0
 
 
-def restore_backups(root: Path) -> list[Path]:
-    """Put back sources left mutated by a killed run."""
+def check_backups(root: Path) -> list[tuple[Path, Path]]:
+    """Delete each backup an older, interrupted run left that equals its source.
+
+    Return the (backup, source) pairs that differ. Only the user knows which
+    file holds the edit to keep, so neither is written.
+    """
 
     base = root / "target" / "mutator-backup"
-    restored: list[Path] = []
+    differing: list[tuple[Path, Path]] = []
     if not base.is_dir():
-        return restored
+        return differing
     for backup in sorted(path for path in base.rglob("*") if path.is_file()):
-        relative = backup.relative_to(base)
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(backup.read_bytes())
-        backup.unlink()
-        restored.append(target)
-    return restored
+        source = root / backup.relative_to(base)
+        if source.is_file() and source.read_bytes() == backup.read_bytes():
+            backup.unlink()
+        else:
+            differing.append((backup, source))
+    return differing
 
 
 def _drop_bytecode(path: Path) -> None:
@@ -276,11 +279,6 @@ def _statuses(found: list[Site], covered: dict[str, bool], outcomes: dict[str, s
     return statuses
 
 
-def _restore_if_dirty(path: Path, original: bytes) -> None:
-    if path.read_bytes() != original:
-        path.write_bytes(original)
-
-
 def mutate_file(
     path: Path,
     root: Path,
@@ -337,7 +335,6 @@ def mutate_file(
         return failure
     forms = _forms(source, path, root, file_key, found, covered, outcomes, lines)
     written = write_results(root, file_key, forms, outcomes)
-    _restore_if_dirty(path, original)
     return RunResult(
         path=file_key,
         forms=forms,

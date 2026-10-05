@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 
-from mutator.engine import BASELINE_TIMEOUT, mutate_file, restore_backups
+from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult, CommandRunner
@@ -269,18 +269,55 @@ def test_a_mutation_run_leaves_the_project_tree_unchanged(tmp_path):
     assert [item for item in (tmp_path / "target").rglob("*") if item.is_file()] == []
 
 
-def test_restore_backups_puts_an_interrupted_mutant_back(tmp_path):
-    source = tmp_path / "src" / "demo.py"
-    source.parent.mkdir()
-    source.write_text("original\n", encoding="utf-8")
-    backup = tmp_path / "target" / "mutator-backup" / "src" / "demo.py"
-    backup.parent.mkdir(parents=True)
-    backup.write_text("original\n", encoding="utf-8")
-    source.write_text("mutated\n", encoding="utf-8")
-    restored = restore_backups(tmp_path)
-    assert restored == [source]
-    assert source.read_text(encoding="utf-8") == "original\n"
-    assert not backup.exists()
+def test_an_edit_saved_while_mutants_run_is_kept(tmp_path):
+    path = tmp_path / "src" / "demo.py"
+    path.parent.mkdir()
+    path.write_text(SOURCE, encoding="utf-8")
+    edited = SOURCE + "# user edit\n"
+
+    class Editor(FakeRunner):
+        def run(self, command, cwd, timeout):
+            if "mutation-workers" in cwd.parts:
+                path.write_text(edited, encoding="utf-8")
+            return super().run(command, cwd, timeout)
+
+    mutate_file(
+        path,
+        tmp_path,
+        runner=Editor(),
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command="fake",
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+        max_workers=1,
+    )
+    assert path.read_text(encoding="utf-8") == edited
+
+
+def test_a_backup_equal_to_its_source_is_deleted_and_one_that_differs_is_kept(tmp_path):
+    base = tmp_path / "target" / "mutator-backup"
+    same = tmp_path / "src" / "same.py"
+    newer = tmp_path / "src" / "newer.py"
+    same.parent.mkdir()
+    same.write_text("original\n", encoding="utf-8")
+    newer.write_text("newer edit\n", encoding="utf-8")
+    (base / "src").mkdir(parents=True)
+    (base / "src" / "same.py").write_text("original\n", encoding="utf-8")
+    (base / "src" / "newer.py").write_text("stale backup\n", encoding="utf-8")
+    (base / "gone.py").write_text("backup of a deleted file\n", encoding="utf-8")
+
+    differing = check_backups(tmp_path)
+
+    assert differing == [(base / "gone.py", tmp_path / "gone.py"), (base / "src" / "newer.py", newer)]
+    assert not (base / "src" / "same.py").exists()
+    assert same.read_text(encoding="utf-8") == "original\n"
+    assert newer.read_text(encoding="utf-8") == "newer edit\n"
+    assert (base / "src" / "newer.py").read_text(encoding="utf-8") == "stale backup\n"
+    assert not (tmp_path / "gone.py").exists()
 
 
 # Workers don't share the project's target/. This command is slow until its
