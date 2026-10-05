@@ -62,6 +62,19 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
     environment["PYTHONPATH"] = os.pathsep.join(entries)
 
 
+def _kill_group(group: int) -> None:
+    """Send SIGKILL to the process group a command leads.
+
+    Linux implements killpg(group) as kill(-group), so group 1 means every
+    process this user may signal and group 0 means mutator's own group. A
+    command started in a new session leads a group above 1.
+    """
+
+    if group <= 1:
+        raise ValueError(f"refusing to signal process group {group}")
+    os.killpg(group, signal.SIGKILL)
+
+
 def display_command(command: Command) -> str:
     """A shell-looking rendering. A list is quoted so it can be pasted."""
 
@@ -107,7 +120,7 @@ class CommandRunner:
             code = process.returncode if process.returncode is not None else 1
             timed_out = False
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            _kill_group(process.pid)
             output, _err = process.communicate()
             code = 124
             timed_out = True
