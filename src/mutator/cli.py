@@ -196,13 +196,7 @@ def _lines(value: str) -> set[int]:
         piece = piece.strip()
         if not piece:
             continue
-        try:
-            number = int(piece)
-        except ValueError:
-            number = 0
-        if number < 1:
-            raise ValueError("--lines requires positive line numbers")
-        found.add(number)
+        found.add(_integer(piece, "--lines", 1, "positive line numbers"))
     if not found:
         raise ValueError("--lines requires a line number")
     return found
