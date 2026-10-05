@@ -28,6 +28,6 @@ Preconditions:
 
 ## Gotchas
 
-- Keep the `src/` layout. For a file at the project root, crapper's Python coverage collects nothing (bandoyer/crapper#3).
+- The `src/` layout works with any crapper. Before bandoyer/crapper#47, a file at the project root got no Python coverage (bandoyer/crapper#3).
 - Without the project's own `.venv`, crapper runs coverage with `python3` and installs coverage.py into it.
 - The run's reproduction loop (`artifacts/reproduce/loop.sh` in the skillflow run for #38) covers the other report kinds: a second Python project, Rust with no coverage tool, Go and Java modules three folders down, and a root `coverage.out` or `jacoco.xml` with no module.
