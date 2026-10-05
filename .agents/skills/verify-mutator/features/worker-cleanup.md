@@ -65,7 +65,7 @@ Preconditions:
 
 ## Gotchas
 
-- `trace` needs `strace`; without it the subcommand stops and names the package to install. Run it inside `bin/sandbox`, like every drive.
+- `trace` needs `strace`; without it the subcommand stops and names the package to install. Where ptrace is blocked (some agent sandboxes), strace records nothing; `trace` then says so and exits 1, so a blocked trace never reads as `(none)`. Run it inside `bin/sandbox`, like every drive.
 
 - Run each signal or nested recipe inside one `bin/sandbox` call. A test command left behind stops by itself after 30 s, and the sandbox ends it sooner. The transcript's `processes left` section is written before the sandbox ends, so it is the check.
 - `signal` gives mutator's own exit code. A mutator that a signal killed outright (the bug) shows as `128 +` the signal, the same `143` as a clean SIGTERM exit, so judge `cleanup-sigterm` by the folders and processes left, not the code alone.

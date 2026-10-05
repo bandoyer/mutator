@@ -94,6 +94,9 @@ for line in open(sys.argv[1]):
         calls.append(pending.pop(tid, "") + text.split("resumed>", 1)[1])
     else:
         calls.append(text)
+if not calls:
+    print("trace: strace recorded no system calls, so nothing was checked (is ptrace blocked here?)")
+    sys.exit(1)
 reaped, signals, late = set(), 0, []
 for call in calls:
     name = call.split("(", 1)[0]
@@ -219,8 +222,11 @@ case "${1:-}" in
     log=$(mktemp)
     record "$project" "$transcript" "strace -f mutator$(printf ' %q' "$@")" \
       strace -f -qq -e trace=kill,wait4,waitid,clone,clone3,fork,vfork -e signal=none -o "$log" "$mutator" "$@"
-    { echo "--- group signals sent after their leader was reaped (strace)"; signals_after_reap "$log"; echo; } | tee -a "$transcript"
+    traced=0
+    found=$(signals_after_reap "$log") || traced=$?
     rm -f "$log"
+    printf -- '--- group signals sent after their leader was reaped (strace)\n%s\n\n' "$found" | tee -a "$transcript"
+    exit "$traced"
     ;;
   cleanup)
     [[ $# -eq 2 ]] || usage
