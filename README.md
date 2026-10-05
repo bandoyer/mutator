@@ -37,7 +37,7 @@ Mutants of one file run at the same time. The default is one worker per core. `-
 
 Each worker is a directory under `target/mutation-workers`. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original files stay as they are. The overlay is removed when that file's mutants finish.
 
-The baseline still runs once, in the real tree, before any worker starts. Each worker then runs the unmutated tests once, with no timeout, before its first mutant. A worker shares no build output with the project, so that run builds it, and mutant runs start as warm as the baseline did. If it fails, the file stops with exit `2` and no mutant is counted. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
+The baseline still runs once, in the real tree, before any worker starts. Each worker then runs the unmutated tests once, without the mutant timeout, before its first mutant. A worker shares no build output with the project, so that run builds it, and mutant runs start as warm as the baseline did. If it fails or times out, the file stops with exit `2` and no mutant is counted. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
 
 ## Snapshot
 
@@ -101,7 +101,7 @@ Tokens inside strings, comments, and quoted Clojure forms are left alone. A repl
 
 ## Tests and coverage
 
-The baseline command has to pass before any mutant runs. A mutant's timeout is ten times that baseline, and at least two seconds. `--timeout-factor` changes the multiple. `--test-command` replaces the default. Defaults:
+The baseline command has to pass before any mutant runs. A mutant's timeout is ten times that baseline, and at least two seconds. `--timeout-factor` changes the multiple. The baseline and each worker's unmutated run have their own limit, 600 seconds unless `--baseline-timeout` says otherwise. A run that reaches it stops the file with exit `2`, and the message says which run timed out. `--test-command` replaces the default. Defaults:
 
 | Language | Command | Where |
 | --- | --- | --- |
