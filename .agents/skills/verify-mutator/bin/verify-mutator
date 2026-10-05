@@ -18,7 +18,7 @@ scratch_root() {
 usage() {
   cat <<USAGE
 usage: verify-mutator doctor
-       verify-mutator project fixture | <git repo>
+       verify-mutator project fixture | cold-build | <git repo>
        verify-mutator drive <project> <transcript> [mutator args...]
        verify-mutator exec <project> <transcript> <command> [args...]
        verify-mutator cleanup <project>
@@ -37,6 +37,23 @@ write_fixture() {
   git -C "$project" init -q
   git -C "$project" add -A
   git -C "$project" -c user.name=verify -c user.email=verify@localhost commit -qm fixture
+}
+
+# A one-function Cargo project. Its build script sleeps 6 s, like a cold build of
+# real dependencies, and runs again only in a target folder that hasn't built it.
+# Its one test can't fail, so a mutant can only be killed by a timeout.
+write_cold_build() {
+  local project=$1
+  mkdir -p "$project/src" "$project/tests"
+  printf '[tools]\nrust = "1.98.0"\n' >"$project/mise.toml"
+  printf '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2024"\nbuild = "build.rs"\n' >"$project/Cargo.toml"
+  printf 'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n    std::thread::sleep(std::time::Duration::from_secs(6));\n}\n' >"$project/build.rs"
+  printf 'pub fn f() -> i32 {\n    1\n}\n' >"$project/src/lib.rs"
+  printf '#[test]\nfn accepts_anything() {\n    let _ = demo::f();\n}\n' >"$project/tests/weak.rs"
+  printf 'target/\n.metrics/\nCargo.lock\n' >"$project/.gitignore"
+  git -C "$project" init -q
+  git -C "$project" add -A
+  git -C "$project" -c user.name=verify -c user.email=verify@localhost commit -qm cold-build
 }
 
 # Runs "$@" in the project and appends the action, what the user saw, and the state left behind.
@@ -81,6 +98,8 @@ case "${1:-}" in
     scratch=$(mktemp -d "${scratch_prefix}XXXXXX")
     if [[ $2 == fixture ]]; then
       write_fixture "$scratch/project"
+    elif [[ $2 == cold-build ]]; then
+      write_cold_build "$scratch/project"
     else
       git clone -q -- "$2" "$scratch/project"
     fi
