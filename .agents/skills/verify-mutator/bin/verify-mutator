@@ -108,6 +108,8 @@ case "${1:-}" in
       [[ -d "$main/../$tool/src" ]] && echo "doctor: link the main checkout's copy: ln -s $(realpath "$main/../$tool") $(realpath -m "$repo/../$tool")"
       exit 1
     done
+    # The fixture's default test command is this .venv's `python -m pytest`, and ./mutator builds .venv without pytest.
+    "$repo/.venv/bin/python" -c 'import pytest' 2>/dev/null || { echo "doctor: $repo/.venv has no pytest, so the fixture's default test command fails; install it: $repo/.venv/bin/pip install -e '$repo[dev]'"; exit 1; }
     echo "doctor: ok"
     echo "mutator:  $mutator ($("$repo/.venv/bin/python" --version))"
     echo "checkout: $(git -C "$repo" rev-parse --short HEAD) on $(git -C "$repo" branch --show-current)$([[ -z "$(git -C "$repo" status --porcelain -- src mutator pyproject.toml)" ]] || echo ' + uncommitted changes')"
