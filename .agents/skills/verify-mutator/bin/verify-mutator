@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Check and drive this checkout's mutator against a scratch project. Run from anywhere.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/../../../.." && pwd)
+mutator="$repo/mutator"
+scratch_prefix="$(realpath -m -- "${TMPDIR:-/tmp}")/mutator-verify."
+
+# Prints the scratch folder that holds path $1 after resolving `..` and symlinks, or fails.
+scratch_root() {
+  local path rest
+  path=$(realpath -m -- "$1")
+  rest=${path#"$scratch_prefix"}
+  [[ $rest != "$path" && -n $rest ]] || return 1
+  echo "$scratch_prefix${rest%%/*}"
+}
+
+usage() {
+  cat <<USAGE
+usage: verify-mutator doctor
+       verify-mutator project fixture | <git repo>
+       verify-mutator drive <project> <transcript> [mutator args...]
+       verify-mutator exec <project> <transcript> <command> [args...]
+       verify-mutator cleanup <project>
+USAGE
+  exit 2
+}
+
+# A one-function Python project whose test kills every mutant of demo.f.
+write_fixture() {
+  local project=$1
+  mkdir -p "$project"
+  printf 'def f():\n    return 1 == 1\n' >"$project/demo.py"
+  printf 'from demo import f\n\n\ndef test_f():\n    assert f() is True\n' >"$project/test_demo.py"
+  printf '[tool.pytest.ini_options]\ntestpaths = ["."]\n' >"$project/pyproject.toml"
+  printf 'target/\n.metrics/\n' >"$project/.gitignore"
+  git -C "$project" init -q
+  git -C "$project" add -A
+  git -C "$project" -c user.name=verify -c user.email=verify@localhost commit -qm fixture
+}
+
+# Runs "$@" in the project and appends the action, what the user saw, and the state left behind.
+record() {
+  local project=$1 transcript=$2 shown=$3
+  shift 3
+  mkdir -p "$(dirname "$transcript")"
+  local out err code
+  out=$(mktemp) err=$(mktemp)
+  set +e
+  (cd "$project" && MISE_TRUSTED_CONFIG_PATHS="$project" MEASURE_TOOLS="$(dirname "$project")/tools" "$@") >"$out" 2>"$err"
+  code=$?
+  set -e
+  {
+    echo "\$ (cd $project) $shown"
+    echo "date: $(date '+%F %T %Z')"
+    echo "mutator: $(git -C "$repo" rev-parse --short HEAD)$([[ -z "$(git -C "$repo" status --porcelain -- src mutator pyproject.toml)" ]] || echo ' + uncommitted changes')"
+    echo "exit code: $code"
+    echo "--- stdout"; cat "$out"
+    echo "--- stderr"; cat "$err"
+    echo "--- worker folders left in target/mutation-workers"
+    find "$project/target/mutation-workers" -mindepth 1 -maxdepth 1 2>/dev/null | sed "s|^$project/||" | grep . || echo "(none)"
+    echo "--- tracked files changed (git status --short)"
+    git -C "$project" status --short --untracked-files=no | grep . || echo "(none)"
+    echo
+  } | tee -a "$transcript"
+  rm -f "$out" "$err"
+}
+
+case "${1:-}" in
+  doctor)
+    [[ -x "$mutator" ]] || { echo "doctor: no launcher at $mutator"; exit 1; }
+    "$mutator" --help >/dev/null 2>&1 || { echo "doctor: $mutator --help failed; run it once to build .venv"; exit 1; }
+    [[ -d "$repo/../crapper/src" ]] || { echo "doctor: crapper is not checked out next to mutator ($repo/../crapper)"; exit 1; }
+    echo "doctor: ok"
+    echo "mutator:  $mutator ($("$repo/.venv/bin/python" --version))"
+    echo "checkout: $(git -C "$repo" rev-parse --short HEAD) on $(git -C "$repo" branch --show-current)$([[ -z "$(git -C "$repo" status --porcelain -- src mutator pyproject.toml)" ]] || echo ' + uncommitted changes')"
+    echo "cores:    $(nproc) (one worker per core by default)"
+    ;;
+  project)
+    [[ $# -eq 2 ]] || usage
+    scratch=$(mktemp -d "${scratch_prefix}XXXXXX")
+    if [[ $2 == fixture ]]; then
+      write_fixture "$scratch/project"
+    else
+      git clone -q -- "$2" "$scratch/project"
+    fi
+    # A project's own measure script finds mutator through MEASURE_TOOLS; point it at this checkout.
+    mkdir -p "$scratch/tools"
+    for tool in mutator crapper dryer; do
+      source=$repo
+      [[ $tool == mutator ]] || source=$(realpath -m -- "$repo/../$tool")
+      ln -s "$source" "$scratch/tools/$tool"
+    done
+    echo "$scratch/project"
+    ;;
+  drive)
+    [[ $# -ge 3 ]] || usage
+    project=$2 transcript=$3
+    shift 3
+    scratch_root "$project" >/dev/null || { echo "drive: refusing $project; it is not inside a verify-mutator scratch folder"; exit 1; }
+    record "$project" "$transcript" "mutator$(printf ' %q' "$@")" "$mutator" "$@"
+    ;;
+  exec)
+    [[ $# -ge 4 ]] || usage
+    project=$2 transcript=$3
+    shift 3
+    scratch_root "$project" >/dev/null || { echo "exec: refusing $project; it is not inside a verify-mutator scratch folder"; exit 1; }
+    record "$project" "$transcript" "$(printf '%q ' "$@")" "$@"
+    ;;
+  cleanup)
+    [[ $# -eq 2 ]] || usage
+    root=$(scratch_root "$2") || { echo "cleanup: refusing to remove $2; it is not a verify-mutator scratch folder"; exit 1; }
+    path=$(realpath -m -- "$2")
+    [[ $path == "$root" || $path == "$root/project" ]] || { echo "cleanup: refusing to remove $2; pass the project or its scratch folder"; exit 1; }
+    rm -rf -- "$root"
+    echo "removed $root"
+    ;;
+  *) usage ;;
+esac
