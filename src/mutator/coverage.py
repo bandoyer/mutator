@@ -128,9 +128,16 @@ def _covered_from_pairs(lines: dict[int, tuple[int, int]] | None) -> set[int] | 
     return {number for number, (covered, _total) in lines.items() if covered > 0}
 
 
-def _jacoco_paths(root: Path, reports) -> list[Path]:
+def _jacoco_paths(root: Path, reports, source: Path | None) -> list[Path]:
+    """The JaCoCo reports to read for `source`: from `reports`, only its own module's.
+
+    JaCoCo keys a file by package and name, so two modules' `demo/Clock.java`
+    would otherwise share one entry.
+    """
+
     if reports is not None:
-        return [report.path for report in reports if report.path.name == "jacoco.xml"]
+        own = [report for report in reports if source.is_relative_to(report.module.resolve())]
+        return [report.path for report in own if report.path.name == "jacoco.xml"]
     paths = [root / "target" / "site" / "jacoco" / "jacoco.xml"]
     paths.extend(root.glob("*/target/site/jacoco/jacoco.xml"))
     paths.extend(root.glob("*/*/target/site/jacoco/jacoco.xml"))
@@ -178,11 +185,11 @@ def _read_jacoco(path: Path, crapper):
         return None
 
 
-def _jacoco_index(root: Path, reports=None) -> dict[str, set[int]]:
+def _jacoco_index(root: Path, reports=None, source: Path | None = None) -> dict[str, set[int]]:
     crapper = ensure_crapper()
     found: dict[str, set[int]] = {}
     seen: set[Path] = set()
-    for path in _jacoco_paths(root, reports):
+    for path in _jacoco_paths(root, reports, source):
         if not path.is_file():
             continue
         resolved = path.resolve()
@@ -220,7 +227,7 @@ def covered_lines(root: Path, source_path: Path, language: str, reports=None) ->
     crapper = ensure_crapper()
     path = source_path.resolve().as_posix()
     if language == "java":
-        return _lookup(_jacoco_index(root, reports), path)
+        return _lookup(_jacoco_index(root, reports, source_path.resolve()), path)
     bundle = crapper.coverage.load_bundle(root, reports)
     if language == "go":
         return _go_lines(bundle.go_profile, path)

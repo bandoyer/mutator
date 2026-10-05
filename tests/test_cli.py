@@ -278,6 +278,18 @@ def _coverage_tools(root: Path, fresh: dict[str, str]):
             id="java-deep-module",
         ),
         pytest.param(
+            {
+                "m1/pom.xml": "<project/>\n",
+                "m1/src/main/java/demo/Clock.java": _JAVA_CLOCK,
+                "m2/pom.xml": "<project/>\n",
+                "m2/src/main/java/demo/Clock.java": _JAVA_CLOCK,
+            },
+            {"m1": _JACOCO.replace('ci="2"', 'ci="0"'), "m2": _JACOCO},
+            [],
+            {"m1/src/main/java/demo/Clock.java": (set(), {5, 9}), "m2/src/main/java/demo/Clock.java": ({5}, {9})},
+            id="java-two-modules",
+        ),
+        pytest.param(
             {"src/main/java/demo/Clock.java": _JAVA_CLOCK, "target/site/jacoco/jacoco.xml": _JACOCO},
             {},
             [],
