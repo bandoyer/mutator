@@ -2,11 +2,12 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 
 from mutator.engine import mutate_file, restore_backups
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
-from mutator.runner import CommandResult
+from mutator.runner import CommandResult, CommandRunner
 from mutator.workers import create_workers, delete_tree, new_run_dir, worker_count
 
 
@@ -82,11 +83,13 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         timeout_factor=10,
         mutation_warning=50,
         baselines={},
+        max_workers=1,
     )
     assert second.forms[0].killed == 1
     assert second.forms[0].survived == 3
-    # Baseline plus the three survivors. The killed mutant stays in the snapshot.
-    assert runner.calls - first_calls == 4
+    # Baseline, the worker's control run, and the three survivors. The killed
+    # mutant stays in the snapshot.
+    assert runner.calls - first_calls == 5
 
 
 def test_uncovered_sites_are_not_executed(tmp_path):
@@ -138,6 +141,7 @@ def test_a_failed_baseline_does_not_rewrite_metrics(tmp_path):
         baselines={},
     )
     assert result.baseline_failed
+    assert result.baseline_message.startswith("Baseline failed")
     assert not snapshot_path(tmp_path, "demo").exists()
 
 
@@ -277,3 +281,54 @@ def test_restore_backups_puts_an_interrupted_mutant_back(tmp_path):
     assert restored == [source]
     assert source.read_text(encoding="utf-8") == "original\n"
     assert not backup.exists()
+
+
+# Workers don't share the project's target/. This command is slow until its
+# target/ holds a marker, the way a cold Cargo build is slow until target/ is built.
+COLD_BUILD = "test -f target/warm || { sleep 3; mkdir -p target && touch target/warm; }"
+
+
+def _mutate_with(tmp_path, test_command):
+    path = tmp_path / "demo.py"
+    path.write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "warm").touch()
+    return mutate_file(
+        path,
+        tmp_path,
+        runner=CommandRunner(),
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command=test_command,
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+        max_workers=1,
+    )
+
+
+def test_a_cold_worker_build_is_not_counted_as_a_kill(tmp_path):
+    result = _mutate_with(tmp_path, COLD_BUILD)
+
+    assert result.statuses == {site.mutation_id: "survived" for site in result.sites}
+
+
+def test_a_hanging_mutant_is_killed_by_the_baseline_timeout(tmp_path):
+    hang = COLD_BUILD + "; if grep -q 'return 0' demo.py; then sleep 30; fi"
+    started = time.monotonic()
+    result = _mutate_with(tmp_path, hang)
+
+    assert set(result.statuses.values()) == {"killed"}
+    assert time.monotonic() - started < 15
+
+
+def test_tests_that_fail_unmutated_in_a_worker_stop_the_run(tmp_path):
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "python").touch()
+    result = _mutate_with(tmp_path, "test -f .venv/python")
+
+    assert result.baseline_failed
+    assert "worker" in result.baseline_message
+    assert not snapshot_path(tmp_path, "demo").exists()

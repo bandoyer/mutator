@@ -72,6 +72,14 @@ CONFIGS = (
 )
 
 
+class WorkerFailed(Exception):
+    """The unmutated tests failed in a worker, so a failing mutant there proves nothing."""
+
+    def __init__(self, output: str):
+        super().__init__(output)
+        self.output = output
+
+
 def worker_count(site_count: int, requested: int | None) -> int:
     """The smaller of the sites, the cores, and an explicit --max-workers."""
 
@@ -338,6 +346,12 @@ def _drain(
     timeout: float,
     file_key: str,
 ) -> None:
+    # The worker shares no build output with the project. This unmutated run
+    # builds it, so mutant runs start as warm as the baseline did and its
+    # timeout is fair. It also proves the tests can pass in the worker at all.
+    control = runner.run(command, mapped_cwd(directory, root, cwd), None)
+    if control.code != 0:
+        raise WorkerFailed(control.output)
     while True:
         try:
             site = pending.get_nowait()

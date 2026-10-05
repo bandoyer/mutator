@@ -11,7 +11,7 @@ from mutator.metrics import load_history, source_key, write_results
 from mutator.model import FormResult, RunResult, Site
 from mutator.report import format_scan
 from mutator.runner import Command, CommandRunner, display_command, test_plan
-from mutator.workers import run_mutants
+from mutator.workers import WorkerFailed, run_mutants
 
 
 def restore_backups(root: Path) -> list[Path]:
@@ -193,14 +193,19 @@ def _remember_baseline(baselines, cache_key, runner, command: Command, cwd: Path
         return
     baseline = runner.run(command, cwd, None)
     if baseline.code != 0:
-        tail = "\n".join(baseline.output.splitlines()[-20:])
-        baselines[cache_key] = (False, baseline.seconds, tail)
+        baselines[cache_key] = (False, baseline.seconds, _tail(baseline.output))
         return
     baselines[cache_key] = (True, baseline.seconds, "")
 
 
-def _baseline_failure(file_key: str, command: Command, tail: str) -> RunResult:
-    message = f"Baseline failed for {file_key}: {display_command(command)}"
+def _tail(output: str) -> str:
+    return "\n".join(output.splitlines()[-20:])
+
+
+def _baseline_failure(
+    file_key: str, command: Command, tail: str, failed: str = "Baseline failed"
+) -> RunResult:
+    message = f"{failed} for {file_key}: {display_command(command)}"
     if tail:
         message = f"{message}\n{tail}"
     return RunResult(path=file_key, forms=[], written=[], baseline_failed=True, baseline_message=message)
@@ -229,19 +234,23 @@ def _apply_selected(
     if not ok:
         return _baseline_failure(file_key, command, tail)
     timeout = max(2.0, seconds * timeout_factor)
-    run_mutants(
-        root,
-        path,
-        original,
-        selected,
-        max_workers,
-        runner,
-        command,
-        cwd,
-        timeout,
-        file_key,
-        outcomes,
-    )
+    try:
+        run_mutants(
+            root,
+            path,
+            original,
+            selected,
+            max_workers,
+            runner,
+            command,
+            cwd,
+            timeout,
+            file_key,
+            outcomes,
+        )
+    except WorkerFailed as failure:
+        failed = "Unmutated tests failed in a mutation worker"
+        return _baseline_failure(file_key, command, _tail(failure.output), failed)
     return None
 
 
