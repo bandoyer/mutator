@@ -100,7 +100,14 @@ case "${1:-}" in
   doctor)
     [[ -x "$mutator" ]] || { echo "doctor: no launcher at $mutator"; exit 1; }
     "$mutator" --help >/dev/null 2>&1 || { echo "doctor: $mutator --help failed; run it once to build .venv"; exit 1; }
-    [[ -d "$repo/../crapper/src" ]] || { echo "doctor: crapper is not checked out next to mutator ($repo/../crapper)"; exit 1; }
+    # A git worktree sits away from the main checkout, so its siblings are missing; name the link that fixes it.
+    main=$(dirname "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)")
+    for tool in crapper dryer; do
+      [[ -d "$repo/../$tool/src" ]] && continue
+      echo "doctor: $tool is not checked out next to mutator ($repo/../$tool)"
+      [[ -d "$main/../$tool/src" ]] && echo "doctor: link the main checkout's copy: ln -s $(realpath "$main/../$tool") $(realpath -m "$repo/../$tool")"
+      exit 1
+    done
     echo "doctor: ok"
     echo "mutator:  $mutator ($("$repo/.venv/bin/python" --version))"
     echo "checkout: $(git -C "$repo" rev-parse --short HEAD) on $(git -C "$repo" branch --show-current)$([[ -z "$(git -C "$repo" status --porcelain -- src mutator pyproject.toml)" ]] || echo ' + uncommitted changes')"

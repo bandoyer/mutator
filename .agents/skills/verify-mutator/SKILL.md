@@ -15,7 +15,7 @@ vm=.agents/skills/verify-mutator/bin/verify-mutator
 
 ## Launch
 
-There is no server and no build. `./mutator` creates `.venv` on first use. crapper must be checked out next to this repo (`../crapper`).
+There is no server and no build. `./mutator` creates `.venv` on first use. crapper and dryer must be checked out next to this repo (`../crapper`, `../dryer`). In a git worktree, link them from the main checkout; doctor prints the `ln -s` command.
 
 It is ready when `$vm doctor` prints `doctor: ok`. Teardown is `$vm cleanup <project>` for each scratch project you made.
 
@@ -25,7 +25,7 @@ It is ready when `$vm doctor` prints `doctor: ok`. Teardown is `$vm cleanup <pro
 $vm doctor
 ```
 
-It runs no mutants and changes no project file. Its `./mutator --help` call creates `.venv` if it is missing, as Launch says. It fails if the launcher is missing, `./mutator --help` fails, or `../crapper` is missing. On success it prints the Python version, the checkout's commit and branch (and whether `src/`, the launcher, or `pyproject.toml` have uncommitted changes), and the core count. The default worker count is one per core, so record it with your proof.
+It runs no mutants and changes no project file. Its `./mutator --help` call creates `.venv` if it is missing, as Launch says. It fails if the launcher is missing, `./mutator --help` fails, or `../crapper` or `../dryer` is missing. On success it prints the Python version, the checkout's commit and branch (and whether `src/`, the launcher, or `pyproject.toml` have uncommitted changes), and the core count. The default worker count is one per core, so record it with your proof.
 
 ## Drive
 
