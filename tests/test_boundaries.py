@@ -35,9 +35,7 @@ from mutator.engine import (
     _covered,
     _drop_bytecode,
     _forms,
-    _restore_if_dirty,
     mutate_file,
-    restore_backups,
     scan_file,
 )
 from mutator.functions import (
@@ -615,46 +613,45 @@ def test_cli_exit_codes_follow_kills_baseline_failure_and_an_empty_tree(tmp_path
     assert "Baseline timed out after 1 s" in capsys.readouterr().err
 
 
-def test_a_scan_does_not_restore_a_backup_and_a_run_does(tmp_path, capsys):
+def test_a_scan_ignores_a_backup_and_a_run_stops_on_one_that_differs(tmp_path, capsys):
     source = tmp_path / "src" / "demo.py"
     source.parent.mkdir()
-    dirty = "def place(x):\n    return x > 0\n"
-    clean = "def place(x):\n    return x > 1\n"
-    source.write_text(dirty, encoding="utf-8")
+    newer = "def place(x):\n    return x > 0\n"
+    stale = "def place(x):\n    return x > 1\n"
+    source.write_text(newer, encoding="utf-8")
     backup = tmp_path / "target" / "mutator-backup" / "src" / "demo.py"
     backup.parent.mkdir(parents=True)
-    backup.write_text(clean, encoding="utf-8")
+    backup.write_text(stale, encoding="utf-8")
     code = run(["--scan", "--no-coverage", "--root", str(tmp_path), "src/demo.py"])
     assert code == 0
-    assert source.read_text(encoding="utf-8") == dirty
+    assert source.read_text(encoding="utf-8") == newer
     scanned = capsys.readouterr().out
     assert "0 -> 1" in scanned
     assert "1 -> 0" not in scanned
 
     failing = f"{sys.executable} -c 'raise SystemExit(1)'"
-    code = run(
-        [
-            "--no-coverage",
-            "--mutate-all",
-            "--root",
-            str(tmp_path),
-            "--test-command",
-            failing,
-            "src/demo.py",
-        ]
-    )
+    mutate = ["--no-coverage", "--mutate-all", "--root", str(tmp_path), "--test-command", failing, "src/demo.py"]
+    code = run(mutate)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert f"{backup} differs from {source}" in err
+    assert "To keep a source, delete its backup." in err
+    assert "To recover a backup, copy it over its source." in err
+    assert "Baseline" not in err
+    assert source.read_text(encoding="utf-8") == newer
+    assert backup.read_text(encoding="utf-8") == stale
+
+    backup.write_text(newer, encoding="utf-8")
+    code = run(mutate)
     assert code == 2
-    assert source.read_text(encoding="utf-8") == clean
+    err = capsys.readouterr().err
+    assert "mutator-backup" not in err
+    assert "Baseline failed" in err
+    assert not backup.exists()
+    assert source.read_text(encoding="utf-8") == newer
 
 
-def test_backups_bytecode_and_a_dirty_file_are_put_back(tmp_path):
-    backup = tmp_path / "target" / "mutator-backup" / "a" / "b" / "demo.py"
-    backup.parent.mkdir(parents=True)
-    backup.write_bytes(b"original\n")
-    restored = restore_backups(tmp_path)
-    assert (tmp_path / "a" / "b" / "demo.py").read_bytes() == b"original\n"
-    assert restored == [tmp_path / "a" / "b" / "demo.py"]
-
+def test_backup_and_bytecode_helpers(tmp_path):
     path = tmp_path / "src" / "demo.py"
     path.parent.mkdir()
     path.write_bytes(b"one")
@@ -668,10 +665,6 @@ def test_backups_bytecode_and_a_dirty_file_are_put_back(tmp_path):
     compiled.write_bytes(b"pyc")
     _drop_bytecode(path)
     assert not compiled.exists()
-
-    path.write_bytes(b"dirty")
-    _restore_if_dirty(path, b"clean")
-    assert path.read_bytes() == b"clean"
 
 
 def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys, monkeypatch):

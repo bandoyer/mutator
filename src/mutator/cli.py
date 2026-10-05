@@ -11,7 +11,7 @@ from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
-from mutator.engine import BASELINE_TIMEOUT, mutate_file, restore_backups, scan_file
+from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandResult, CommandRunner
 
@@ -118,12 +118,13 @@ whose text changed. Killed mutants in unchanged functions are kept.
 Selected mutants of one file run at the same time, one worker per core unless
 --max-workers says otherwise. A worker is a symlink overlay under
 target/mutation-workers with its own copy of the mutated file. The project
-tree is left unchanged. A copy left under target/mutator-backup/ by an
-interrupted older run is restored before a non-scan run.
+tree is left unchanged. Before a non-scan run, a copy an interrupted older
+run left under target/mutator-backup/ is deleted when it equals its source.
+When it differs, mutator stops with exit 1 and changes neither file.
 
 Exit codes:
   0  every executed mutant was killed, or there was nothing to run
-  1  usage error
+  1  usage error, or a backup that differs from its source
   2  baseline tests failed, in the project or in a worker
   3  at least one mutant survived
 
@@ -498,9 +499,18 @@ def _require_crapper() -> str | None:
     return None
 
 
-def _restore(root: Path) -> None:
-    for path in restore_backups(root):
-        print(f"Restored {path} from an interrupted mutation.", file=sys.stderr)
+def _differing_backups(root: Path) -> bool:
+    differing = check_backups(root)
+    for backup, source in differing:
+        print(f"{backup} differs from {source}.", file=sys.stderr)
+    if differing:
+        print(
+            "An interrupted older run of mutator left each backup above. mutator changed no file. "
+            "To keep a source, delete its backup. To recover a backup, copy it over its source. "
+            "Then run mutator again.",
+            file=sys.stderr,
+        )
+    return bool(differing)
 
 
 def _scan(options: Options, root: Path, files: list[Path]) -> int:
@@ -593,8 +603,8 @@ def run(argv: list[str] | None = None) -> int:
     if not files:
         print("No source files to mutate.")
         return 0
-    if not options.scan:
-        _restore(root)
+    if not options.scan and _differing_backups(root):
+        return 1
     coverage = _prepare_coverage(options, root, files)
     if coverage != 0:
         return coverage
