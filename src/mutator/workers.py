@@ -419,8 +419,14 @@ def _run_all(
             )
             for directory in directories
         ]
-        for future in futures:
-            future.result()
+        try:
+            for future in futures:
+                future.result()
+        except (KeyboardInterrupt, SystemExit):
+            # Only the main thread sees Ctrl-C or SIGTERM. The workers' commands
+            # must stop too, or leaving this block waits for each of them.
+            runner.stop()
+            raise
 
 
 def run_mutants(

@@ -4,6 +4,9 @@ import subprocess
 import threading
 import time
 
+import pytest
+from conftest import wait_until
+
 from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
@@ -396,3 +399,19 @@ def test_verbose_names_the_mutant_timeout_and_where_it_comes_from(tmp_path, caps
     _mutate_with(tmp_path, "true", verbose=True)
 
     assert "Mutant timeout for demo.py: 2.0 s (baseline 0.0 s x 10, at least 2 s)" in capsys.readouterr().err
+
+
+def test_ctrl_c_stops_the_worker_commands_and_removes_the_run_folder(tmp_path, ctrl_c_when):
+    started = tmp_path / "started"
+    late = tmp_path / "late"
+    in_worker = f'case "$PWD" in *mutation-workers*) touch {started}; sleep 2; touch {late};; esac; true'
+    ctrl_c_when(started)
+
+    with pytest.raises(KeyboardInterrupt):
+        _mutate_with(tmp_path, in_worker)
+
+    # Within the 1 s grace, plus time to notice the stop and remove the folder.
+    assert time.time() - started.stat().st_mtime < 2.0
+    assert list((tmp_path / "target" / "mutation-workers").iterdir()) == []
+    wait_until(started, 2.5)
+    assert not late.exists()

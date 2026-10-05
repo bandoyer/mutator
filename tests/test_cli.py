@@ -1,5 +1,9 @@
+import signal
 import subprocess
 import sys
+import threading
+
+import pytest
 
 from mutator.cli import parse_args, run
 from mutator.runner import CommandResult
@@ -119,3 +123,44 @@ def test_a_failed_coverage_command_does_not_read_the_report(tmp_path, capsys):
     assert "will not be read" in captured.err
     assert "Baseline failed" not in captured.err
     assert path.read_text(encoding="utf-8").startswith("def place")
+
+
+def _demo(tmp_path):
+    (tmp_path / "demo.py").write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
+    return ["--no-coverage", "--root", str(tmp_path), "demo.py"]
+
+
+def test_sigterm_during_a_run_exits_143_and_the_old_handler_comes_back(tmp_path, monkeypatch):
+    exits = []
+
+    def mutate(options, root, files):
+        handler = signal.getsignal(signal.SIGTERM)
+        with pytest.raises(SystemExit) as stop:
+            handler(signal.SIGTERM, None)
+        exits.append(stop.value.code)
+        return 0
+
+    monkeypatch.setattr("mutator.cli._mutate_files", mutate)
+    before = signal.getsignal(signal.SIGTERM)
+
+    assert run(_demo(tmp_path)) == 0
+    assert exits == [143]
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_a_run_off_the_main_thread_works_and_installs_no_handler(tmp_path, monkeypatch):
+    seen = []
+
+    def mutate(options, root, files):
+        seen.append(signal.getsignal(signal.SIGTERM))
+        return 0
+
+    monkeypatch.setattr("mutator.cli._mutate_files", mutate)
+    before = signal.getsignal(signal.SIGTERM)
+    codes = []
+    thread = threading.Thread(target=lambda: codes.append(run(_demo(tmp_path))))
+    thread.start()
+    thread.join()
+
+    assert codes == [0]
+    assert seen == [before]
