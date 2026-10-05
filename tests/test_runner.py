@@ -1,7 +1,9 @@
+import ast
 import shlex
 import signal
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -202,3 +204,29 @@ def test_the_wait_for_the_group_gives_up_at_the_deadline(monkeypatch):
     monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
     _end_group(4242, patience=5.0)
     assert signals == [4242, 4242]
+
+
+def _signal_senders():
+    """Each place in src/ that names os.kill or os.killpg, as (file, function)."""
+
+    found = []
+    for path in sorted((Path(__file__).resolve().parents[1] / "src").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owners = {}
+        for function in ast.walk(tree):
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for node in ast.walk(function):
+                    owners.setdefault(node, function.name)
+        for node in ast.walk(tree):
+            imported = isinstance(node, ast.ImportFrom) and node.module == "os"
+            if imported and any(alias.name in ("kill", "killpg") for alias in node.names):
+                found.append((path.name, owners.get(node, "<module>")))
+            named = isinstance(node, ast.Attribute) and node.attr in ("kill", "killpg")
+            if named and isinstance(node.value, ast.Name) and node.value.id == "os":
+                found.append((path.name, owners.get(node, "<module>")))
+    return found
+
+
+def test_signals_go_only_through_the_group_guard():
+    # killpg(1) is kill(-1) on Linux: it reaches every process the user owns.
+    assert _signal_senders() == [("runner.py", "_kill_group")]
