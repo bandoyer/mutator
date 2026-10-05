@@ -360,20 +360,29 @@ def test_a_group_is_signalled_only_while_its_leader_is_unreaped(tmp_path, group_
 
 
 def _interrupt_after_the_reap(monkeypatch):
-    """Raise SystemExit, as mutator's SIGTERM handler does, just after a waitpid reaps a child."""
+    """Raise SystemExit, as mutator's SIGTERM handler does, just after Popen reaps the leader.
 
-    real = os.waitpid
+    Popen's waitpid can't be patched on every Python: 3.11 and 3.12 bind it as a
+    default argument, and 3.13 on read it from subprocess._del_safe. So this patches
+    Popen._handle_exitstatus, a private method that every Popen reap from 3.11 on
+    calls after the reap and before it sets returncode. If a later Python renames
+    it, setattr fails; if it calls it before the reap, `fired` says "not reaped".
+    """
+
+    real = subprocess.Popen._handle_exitstatus
     fired = []
 
-    def waitpid(pid, options):
-        reaped = real(pid, options)
-        if reaped[0] > 0 and not fired:
-            fired.append(reaped[0])
+    def handle_exitstatus(self, sts, *args, **kwargs):
+        if not fired:
+            try:
+                WAITID(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                fired.append("not reaped")
+            except ChildProcessError:
+                fired.append("reaped")
             raise SystemExit(143)
-        return reaped
+        return real(self, sts, *args, **kwargs)
 
-    monkeypatch.setattr(os, "waitpid", waitpid)
-    monkeypatch.setattr(subprocess._del_safe, "waitpid", waitpid)
+    monkeypatch.setattr(subprocess.Popen, "_handle_exitstatus", handle_exitstatus)
     return fired
 
 
@@ -385,7 +394,7 @@ def test_without_waitid_an_interrupted_reap_is_never_signalled(tmp_path, group_s
     with pytest.raises(SystemExit):
         CommandRunner().run("true", tmp_path, 5)
 
-    assert fired
+    assert fired == ["reaped"]
     assert [sig for sig, reaped in group_signals if reaped] == []
 
 

@@ -8,6 +8,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The lowest Python pyproject.toml allows, and the newest.
+        python-version: ["3.11", "3.14"]
     steps:
       # mutator imports crapper from a checkout next to it.
       - uses: actions/checkout@v4
@@ -19,7 +23,7 @@ jobs:
           path: crapper
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e "./mutator[dev]"
       - run: python -m pytest -q
         working-directory: mutator
