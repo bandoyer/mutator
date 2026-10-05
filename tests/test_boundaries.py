@@ -6,6 +6,7 @@ alone when no input can tell the operators apart.
 """
 
 import hashlib
+import re
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from mutator.cli import (
+    HELP,
     GitStatusError,
     _changed_files,
     _is_source,
@@ -392,6 +394,18 @@ def test_options_reject_bad_values_and_keep_flag_defaults(monkeypatch):
     options = parse_args(None)
     assert options.verbose is True
     assert options.positionals == []
+
+
+def test_every_number_option_in_the_help_rejects_zero_and_values_that_are_not_finite():
+    numbers = re.findall(r"^  (--[\w-]+) <(?:number|seconds)>", HELP, re.MULTILINE)
+    assert {"--timeout-factor", "--baseline-timeout", "--max-workers"} <= set(numbers)
+    for option in numbers:
+        for value in ["0", "inf", "nan"]:
+            options = parse_args([option, value])
+            assert options.exit_code == 1, (option, value)
+            assert options.message.startswith(f"{option} requires"), (option, value)
+    assert "--mutation-warning <count>" in HELP
+    assert parse_args(["--mutation-warning", "0"]).mutation_warning == 0
 
 
 def test_help_and_conflicts_use_different_streams(capsys):

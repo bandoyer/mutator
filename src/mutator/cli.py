@@ -95,7 +95,7 @@ Options:
   --baseline-timeout <seconds>  Stop when the unmutated tests run longer than
                                 this, in the project or in a worker.
                                 Default: {BASELINE_TIMEOUT:g}.
-  --mutation-warning <number>   Warn when a file selects more covered sites
+  --mutation-warning <count>    Warn when a file selects more covered sites
                                 than this. Default: 50.
   --max-workers <number>        Run at most this many mutants of one file at
                                 once. Default: one per core. The run uses the
@@ -169,6 +169,13 @@ def _take(args: list[str], index: int, option: str) -> str:
     return args[index + 1]
 
 
+def _positive(value: str, option: str) -> float:
+    number = float(value)
+    if not 0 < number < math.inf:
+        raise ValueError(f"{option} requires a finite positive number")
+    return number
+
+
 def _workers(value: str) -> int:
     try:
         count = int(value)
@@ -220,15 +227,11 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 index += 2
                 continue
             if arg == "--timeout-factor":
-                options.timeout_factor = float(_take(args, index, arg))
-                if options.timeout_factor <= 0:
-                    raise ValueError("--timeout-factor requires a positive number")
+                options.timeout_factor = _positive(_take(args, index, arg), arg)
                 index += 2
                 continue
             if arg == "--baseline-timeout":
-                options.baseline_timeout = float(_take(args, index, arg))
-                if not 0 < options.baseline_timeout < math.inf:
-                    raise ValueError("--baseline-timeout requires a finite positive number")
+                options.baseline_timeout = _positive(_take(args, index, arg), arg)
                 index += 2
                 continue
             if arg == "--mutation-warning":
