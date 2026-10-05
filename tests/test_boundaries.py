@@ -377,6 +377,8 @@ def test_options_reject_bad_values_and_keep_flag_defaults(monkeypatch):
     assert parse_args([]).baseline_timeout == 600
     assert parse_args(["--baseline-timeout", "1.5"]).baseline_timeout == 1.5
     assert parse_args(["--baseline-timeout", "0"]).exit_code == 1
+    assert parse_args(["--baseline-timeout", "inf"]).exit_code == 1
+    assert parse_args(["--baseline-timeout", "nan"]).exit_code == 1
     assert parse_args(["--use-existing-coverage"]).use_existing_coverage is True
     assert parse_args(["--reuse-coverage"]).use_existing_coverage is True
     assert parse_args(["--verbose"]).verbose is True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
@@ -226,8 +227,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 continue
             if arg == "--baseline-timeout":
                 options.baseline_timeout = float(_take(args, index, arg))
-                if options.baseline_timeout <= 0:
-                    raise ValueError("--baseline-timeout requires a positive number")
+                if not 0 < options.baseline_timeout < math.inf:
+                    raise ValueError("--baseline-timeout requires a finite positive number")
                 index += 2
                 continue
             if arg == "--mutation-warning":
