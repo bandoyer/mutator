@@ -15,12 +15,19 @@ scratch_root() {
   echo "$scratch_prefix${rest%%/*}"
 }
 
+# Stops the subcommand $1 unless project $2 is inside a scratch folder `project` made,
+# so a real checkout is never driven by mistake.
+admit() {
+  scratch_root "$2" >/dev/null || { echo "$1: refusing $2; it is not inside a verify-mutator scratch folder"; exit 1; }
+}
+
 usage() {
   cat <<USAGE
 usage: verify-mutator doctor
        verify-mutator project fixture | cold-build | <git repo>
        verify-mutator drive <project> <transcript> [mutator args...]
        verify-mutator exec <project> <transcript> <command> [args...]
+       verify-mutator signal <project> <transcript> TERM|INT <seconds> [mutator args...]
        verify-mutator cleanup <project>
 USAGE
   exit 2
@@ -138,15 +145,27 @@ case "${1:-}" in
     [[ $# -ge 3 ]] || usage
     project=$2 transcript=$3
     shift 3
-    scratch_root "$project" >/dev/null || { echo "drive: refusing $project; it is not inside a verify-mutator scratch folder"; exit 1; }
+    admit drive "$project"
     record "$project" "$transcript" "mutator$(printf ' %q' "$@")" "$mutator" "$@"
     ;;
   exec)
     [[ $# -ge 4 ]] || usage
     project=$2 transcript=$3
     shift 3
-    scratch_root "$project" >/dev/null || { echo "exec: refusing $project; it is not inside a verify-mutator scratch folder"; exit 1; }
+    admit exec "$project"
     record "$project" "$transcript" "$(printf '%q ' "$@")" "$@"
+    ;;
+  signal)
+    [[ $# -ge 5 && ( $4 == TERM || $4 == INT ) ]] || usage
+    project=$2 transcript=$3 sig=$4 after=$5
+    shift 5
+    admit signal "$project"
+    # timeout sends the signal to this mutator only (test commands run in their own sessions),
+    # and SIGKILL 2 s later if it is still running. A shell can start a job with SIGINT ignored,
+    # so Python resets it to the default first, as Ctrl-C at a terminal would find it.
+    record "$project" "$transcript" "timeout -k 2 -s $sig $after mutator$(printf ' %q' "$@")" \
+      "$repo/.venv/bin/python" -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+      timeout -k 2 -s "$sig" --preserve-status "$after" "$mutator" "$@"
     ;;
   cleanup)
     [[ $# -eq 2 ]] || usage

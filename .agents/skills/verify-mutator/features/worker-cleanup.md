@@ -2,10 +2,15 @@
 
 Each file's mutants run in worker folders under `target/mutation-workers/run-<id>/worker-<n>`. When the file's mutants finish, mutator removes the whole `run-<id>` folder. The run must not crash while removing it, even when the test command started a process that is still writing in the worker.
 
+When mutator gets SIGTERM (what `timeout` and `kill` send) or Ctrl-C, it stops every test command it is running and removes the folder before it exits. To stop a command, it sends SIGTERM to the command's process group, waits up to 1 s, then sends SIGKILL. A mutator run nested in a test command therefore gets the same chance to clean up. SIGKILL to mutator itself can't be caught, so after it the folder and the test commands stay.
+
 ## Sub-features
 
 - `cleanup-normal` leaves no folder in `target/mutation-workers` after an ordinary run.
 - `cleanup-leftover-process` finishes without `OSError: Directory not empty` when the test command leaves a process writing in the worker's `target/debug/deps`, and leaves no worker folder.
+- `cleanup-sigterm` stops the test command and removes the folder when mutator gets SIGTERM during a worker's run, and exits `143`.
+- `cleanup-ctrl-c` does the same for Ctrl-C (SIGINT), during the baseline and during a worker's run.
+- `cleanup-nested-timeout` lets a mutator run nested in a test command clean up when the outer run's timeout stops that command (issue #21).
 
 ## How to get to it (user POV)
 
@@ -27,7 +32,28 @@ Preconditions:
 
   Run `$vm drive "$project" "$T" --no-coverage --mutate-all --test-command "$leftover" demo.py`. Pass: exit code `3` (the command always passes, so every mutant survives), no `Directory not empty` or `Traceback` in stderr, and worker folders `(none)`. The bug shows as exit code `1`, `OSError: [Errno 39] Directory not empty: '.../worker-<n>/target/debug/deps'`, and a `run-<id>` folder left behind.
 
+- **cleanup-sigterm.** `project=$($vm project fixture)`. Run `$vm signal "$project" "$T" TERM 3 --no-coverage --mutate-all --max-workers 1 --test-command 'case "$PWD" in *mutation-workers*) sleep 30;; esac; true' demo.py`. The baseline passes at once, and the control run in worker-0 is still in `sleep 30` when SIGTERM arrives. Pass: exit code `143`, no traceback, worker folders `(none)`, and processes left `(none)`. The bug shows as a `run-<id>` folder and `sleep 30` left behind. Exit code `137` means mutator was still running 2 s after the signal.
+- **cleanup-ctrl-c.** Two drives, each with a fresh fixture project:
+  - During a worker's run: the same command as `cleanup-sigterm`, with `INT` in place of `TERM`.
+  - During the baseline: `$vm signal "$project" "$T" INT 3 --no-coverage --mutate-all --max-workers 1 --test-command 'sleep 30' demo.py`.
+
+  Pass for both: exit code `130`, stderr ends with Python's `KeyboardInterrupt`, worker folders `(none)`, and processes left `(none)`. The bug shows as `sleep 30` left behind, and, during a worker's run, as exit code `137`: mutator hung waiting for the worker until the SIGKILL.
+- **cleanup-nested-timeout.** The outer test command runs a second mutator on the outer worker. The inner control run keeps writing files in the inner worker, so the outer control run hangs until `--baseline-timeout 3` stops it:
+
+  ```bash
+  project=$($vm project fixture)
+  scripts=$(dirname "$project")
+  printf 'case "$PWD" in */mutation-workers/*/mutation-workers/*) end=$(( $(date +%%s) + 30 )); i=0; while [ "$(date +%%s)" -lt "$end" ]; do : > "w$i"; i=$((i+1)); done;; esac\nexit 0\n' >"$scripts/inner.sh"
+  printf 'case "$PWD" in */mutation-workers/*) exec %s --no-coverage --mutate-all --max-workers 1 --test-command "sh %s/inner.sh" demo.py;; esac\nexit 0\n' "$PWD/mutator" "$scripts" >"$scripts/outer.sh"
+  $vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 1 --baseline-timeout 3 --test-command "sh $scripts/outer.sh" demo.py
+  ```
+
+  Run it from the repo root, so `$PWD/mutator` is this checkout's launcher. Pass: exit code `2`, stderr says `Unmutated tests timed out after 3 s in a mutation worker for demo.py`, no traceback, worker folders `(none)`, and processes left `(none)`. The bug shows as exit code `1` with `OSError: [Errno 39] Directory not empty: '.../worker-0/target/mutation-workers/run-<id>/worker-0'`, a `run-<id>` folder, and `sh .../inner.sh` left running.
+
 ## Gotchas
+
+- Run each signal or nested recipe inside one `bin/sandbox` call. A test command left behind stops by itself after 30 s, and the sandbox ends it sooner. The transcript's `processes left` section is written before the sandbox ends, so it is the check.
+- `signal` gives mutator's own exit code. A mutator that a signal killed outright (the bug) shows as `128 +` the signal, the same `143` as a clean SIGTERM exit, so judge `cleanup-sigterm` by the folders and processes left, not the code alone.
 
 - The leftover writer also runs during the baseline, in the scratch project's own `target/debug/deps`. That is expected and is removed by cleanup.
 - Without `--mutate-all`, a project that already has `.metrics/mutate` reruns nothing, so the recipe proves nothing. Keep the flag.

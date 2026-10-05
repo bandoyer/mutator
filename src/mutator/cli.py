@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 import os
+import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -586,7 +588,30 @@ def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
     return _finish(baseline_failed, survived)
 
 
+def _terminated(signum, _frame):
+    # Unwind like Ctrl-C does, so each finally stops its commands and removes
+    # its worker folder. 128 + 15 is the code a shell reports for SIGTERM.
+    raise SystemExit(128 + signum)
+
+
 def run(argv: list[str] | None = None) -> int:
+    """Run mutator. On the main thread, SIGTERM cleans up and exits 143 while it runs.
+
+    Python lets only the main thread set a signal handler. The handler is set
+    here, not in main(), because mutator's own tests call run() in the test
+    process, so a mutant can start a whole run inside a worker (issue #21).
+    """
+
+    if threading.current_thread() is not threading.main_thread():
+        return _run(argv)
+    earlier = signal.signal(signal.SIGTERM, _terminated)
+    try:
+        return _run(argv)
+    finally:
+        signal.signal(signal.SIGTERM, earlier)
+
+
+def _run(argv: list[str] | None) -> int:
     options = parse_args(argv)
     if options.action == "help":
         return _print_help(options)

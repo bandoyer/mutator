@@ -1,14 +1,26 @@
 import ast
 import math
+import os
 import shlex
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+from conftest import wait_until
 
-from mutator.runner import CommandRunner, _clojure_command, _end_group, _kill_group, _python_command, nearest
+from mutator.runner import (
+    CommandRunner,
+    Stopped,
+    _clojure_command,
+    _end_group,
+    _kill_group,
+    _python_command,
+    _signal_group,
+    nearest,
+)
 from mutator.runner import test_plan as plan_command
 
 
@@ -166,12 +178,14 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
 def test_only_a_group_the_command_leads_is_signalled(monkeypatch):
     sent = []
     monkeypatch.setattr("mutator.runner.os.killpg", lambda group, sig: sent.append((group, sig)))
-    for group in (1, 0, -7):
-        with pytest.raises(ValueError):
-            _kill_group(group)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for group in (1, 0, -7):
+            with pytest.raises(ValueError):
+                _kill_group(group, sig)
     assert sent == []
-    _kill_group(4242)
-    assert sent == [(4242, signal.SIGKILL)]
+    _kill_group(4242, signal.SIGTERM)
+    _kill_group(4242, signal.SIGKILL)
+    assert sent == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
 
 
 def test_nothing_the_command_started_outlives_the_run(tmp_path):
@@ -215,8 +229,11 @@ def test_the_wait_for_the_group_gives_up_at_the_deadline(monkeypatch):
     assert signals == [4242, 4242]
 
 
+OTHER_SENDERS = ("send_signal", "terminate", "pthread_kill", "raise_signal", "pidfd_send_signal")
+
+
 def _signal_senders():
-    """Each place in src/ that names os.kill or os.killpg, as (file, function)."""
+    """Each place in src/ that names a way to signal a process, as (file, function)."""
 
     found = []
     for path in sorted((Path(__file__).resolve().parents[1] / "src").rglob("*.py")):
@@ -232,6 +249,9 @@ def _signal_senders():
                 found.append((path.name, owners.get(node, "<module>")))
             named = isinstance(node, ast.Attribute) and node.attr in ("kill", "killpg")
             if named and isinstance(node.value, ast.Name) and node.value.id == "os":
+                found.append((path.name, owners.get(node, "<module>")))
+            # Popen's and signal's own senders reach a pid without the guard too.
+            if isinstance(node, ast.Attribute) and node.attr in OTHER_SENDERS:
                 found.append((path.name, owners.get(node, "<module>")))
     return found
 
@@ -252,3 +272,163 @@ def test_verbose_reports_how_each_command_ended(tmp_path, capsys):
     assert lines[3].startswith(f"= ({tmp_path}) exit 124 in ")
     assert lines[3].endswith(" s, timed out")
     assert lines[5].startswith(f"= ({tmp_path}) exit 127 in ")
+
+
+def test_ctrl_c_stops_the_command_it_interrupts(tmp_path, ctrl_c_when):
+    started = tmp_path / "started"
+    late = tmp_path / "late"
+    ctrl_c_when(started)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner().run(f"touch {started}; sleep 2; touch {late}", tmp_path, None)
+
+    wait_until(started, 2.5)
+    assert not late.exists()
+
+
+def test_ctrl_c_does_not_wait_for_what_a_finished_command_left_holding_its_output(tmp_path, ctrl_c_when):
+    # The shell exits at once; its background sleep keeps the output pipe open.
+    # Python's own Ctrl-C handling then reaps the shell, so its group is no longer
+    # known to be the command's, and the run must not wait for the sleep.
+    started = tmp_path / "started"
+    ctrl_c_when(started)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner().run(f"touch {started}; sleep 3 & exit 0", tmp_path, None)
+
+    assert time.time() - started.stat().st_mtime < 2.0
+
+
+def test_ctrl_c_during_the_grace_kills_the_command_at_once(tmp_path, ctrl_c_when):
+    graced = tmp_path / "graced"
+    late = tmp_path / "late"
+    ignores_sigterm = f"trap '' TERM; (sleep 0.6; touch {graced}) & sleep 2; touch {late}"
+    ctrl_c_when(graced)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner().run(ignores_sigterm, tmp_path, 0.3)
+
+    wait_until(graced, 1.8)
+    assert not late.exists()
+
+
+def test_a_timed_out_command_gets_sigterm_before_sigkill(tmp_path):
+    termed = tmp_path / "termed"
+    command = f"trap 'touch {termed}; exit 0' TERM; sleep 30 & wait"
+    result = CommandRunner().run(command, tmp_path, 0.3)
+
+    assert result.timed_out
+    assert termed.exists()
+
+
+def test_a_timed_out_command_that_ignores_sigterm_is_killed_after_the_grace(tmp_path):
+    started = time.monotonic()
+    result = CommandRunner().run("echo before; trap '' TERM; sleep 30", tmp_path, 0.3)
+
+    assert result.timed_out
+    assert result.output == "before\n"
+    assert time.monotonic() - started < 0.3 + 1.0 + 1.0
+
+
+class SlowCommand:
+    """A command that never ends, on a clock that moves only while it is waited for."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.waits = []
+
+    def communicate(self, timeout):
+        self.waits.append(timeout)
+        assert len(self.waits) < 10, self.waits
+        self.now += timeout
+        raise subprocess.TimeoutExpired("slow", timeout)
+
+
+def test_the_wait_comes_in_slices_and_the_last_one_ends_at_the_timeout(monkeypatch):
+    command = SlowCommand()
+    monkeypatch.setattr("mutator.runner.SLICE", 0.25)
+    monkeypatch.setattr("mutator.runner.time.monotonic", lambda: command.now)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        CommandRunner()._communicate(command, 0.625)
+
+    assert command.waits == [0.25, 0.25, 0.125]
+
+
+def test_an_endless_timeout_is_bounded(monkeypatch):
+    command = SlowCommand()
+    monkeypatch.setattr("mutator.runner.SLICE", 1_000_000.0)
+    monkeypatch.setattr("mutator.runner.time.monotonic", lambda: command.now)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        CommandRunner()._communicate(command, math.inf)
+
+    assert command.waits == [1_000_000.0, 1_000_000.0]
+
+
+NESTED_RUN = "import sys\nfrom mutator.cli import run\nsys.exit(run(sys.argv[1:]))\n"
+
+
+def test_a_timed_out_command_lets_a_nested_run_clean_up(tmp_path):
+    # Issue #21: mutator's own tests call run() in the test process, so a
+    # mutant can start a whole mutation run inside a worker's test command.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    started = tmp_path / "started"
+    late = tmp_path / "late"
+    inner_tests = f'case "$PWD" in *mutation-workers*) touch {started}; sleep 5; touch {late};; esac; true'
+    nested = [sys.executable, "-c", NESTED_RUN, "--no-coverage", "--mutate-all", "--max-workers", "1"]
+    nested += ["--root", str(project), "--test-command", inner_tests, str(project / "demo.py")]
+
+    result = CommandRunner().run(nested, project, 3)
+
+    assert started.exists(), result.output
+    assert result.timed_out
+    assert list((project / "target" / "mutation-workers").iterdir()) == []
+    wait_until(started, 5.5)
+    assert not late.exists()
+
+
+def test_stop_after_a_command_finished_signals_nothing_and_starts_nothing(monkeypatch, tmp_path):
+    runner = CommandRunner()
+    runner.run("true", tmp_path, 5)
+    sent = []
+    monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
+
+    runner.stop()
+
+    assert sent == []
+    with pytest.raises(Stopped):
+        runner.run(f"touch {tmp_path / 'ran'}", tmp_path, 5)
+    assert not (tmp_path / "ran").exists()
+
+
+def test_a_reaped_leader_is_never_signalled(monkeypatch):
+    sent = []
+    monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
+    finished = subprocess.Popen(["true"], start_new_session=True)
+    finished.wait()
+    behind_popens_back = subprocess.Popen(["true"], start_new_session=True)
+    os.waitpid(behind_popens_back.pid, 0)  # reaped, but returncode stays None
+
+    assert _signal_group(finished, signal.SIGTERM) is False
+    assert _signal_group(behind_popens_back, signal.SIGTERM) is False
+
+    assert behind_popens_back.returncode is None
+    assert sent == []
+
+
+def test_an_unreaped_leader_is_signalled_with_or_without_waitid(monkeypatch):
+    sent = []
+    monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
+    running = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        assert _signal_group(running, signal.SIGTERM) is True
+        monkeypatch.delattr("mutator.runner.os.waitid")  # macOS before Python 3.13
+        assert _signal_group(running, signal.SIGKILL) is True
+    finally:
+        running.kill()
+        running.wait()
+
+    assert sent == [(running.pid, signal.SIGTERM), (running.pid, signal.SIGKILL)]

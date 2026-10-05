@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 Command = str | list[str]
 
-# poll() takes at most 2**31 - 1 ms, about 24.8 days, and a longer timeout
-# raises OverflowError inside communicate() while the command keeps running.
-# A huge --timeout-factor or --baseline-timeout gets this bound instead.
+# A command is waited for in slices this long, so a stop is noticed quickly.
+# A slice also stays far below poll()'s limit of 2**31 - 1 ms, so a huge
+# --timeout-factor or --baseline-timeout can't overflow it.
+SLICE = 0.1
+# The longest any command is waited for, about 23 days. A huge or infinite
+# --timeout-factor or --baseline-timeout gets this bound instead.
 LONGEST_TIMEOUT = 2_000_000.0
+# How long a command has to end after SIGTERM before it gets SIGKILL. A mutator
+# run nested in a test command uses it to stop its own commands and clean up.
+GRACE = 1.0
 
 
 @dataclass(frozen=True)
@@ -67,8 +75,56 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
     environment["PYTHONPATH"] = os.pathsep.join(entries)
 
 
-def _kill_group(group: int) -> None:
-    """Send SIGKILL to the process group a command leads.
+class Stopped(Exception):
+    """Mutator is stopping, so the command was stopped or never started."""
+
+
+def _signal_group(process: subprocess.Popen, sig: int) -> bool:
+    """Signal the command's group while its leader is unreaped. Return whether it did.
+
+    Until the leader is reaped, even as a zombie, its pid stays the id of its
+    group, so the signal reaches only the command's processes. Popen sets
+    returncode when it reaps. An exception that lands inside that reap leaves
+    returncode unset, so the kernel is asked too: WNOWAIT reaps nothing, and a
+    leader already reaped raises ChildProcessError. Only the thread that runs
+    the command calls this, so nothing reaps it between the check and the signal.
+    """
+
+    if process.returncode is not None:
+        return False
+    if hasattr(os, "waitid"):  # macOS has it from Python 3.13
+        try:
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+    _kill_group(process.pid, sig)
+    return True
+
+
+def _stop(process: subprocess.Popen) -> str:
+    """SIGTERM the command's group, give it GRACE to end, then SIGKILL it. Return its output.
+
+    When the leader is already reaped, the group can't be signalled safely, so
+    nothing that still holds the command's output is waited for. Python's own
+    Ctrl-C handling in communicate() can reap a leader that has exited.
+    """
+
+    _signal_group(process, signal.SIGTERM)
+    try:
+        output, _err = process.communicate(timeout=GRACE)
+    except subprocess.TimeoutExpired:
+        if not _signal_group(process, signal.SIGKILL):
+            return ""
+        output, _err = process.communicate()
+    except BaseException:
+        # Ctrl-C or SIGTERM during the grace: don't wait it out.
+        _signal_group(process, signal.SIGKILL)
+        raise
+    return output or ""
+
+
+def _kill_group(group: int, sig: int = signal.SIGKILL) -> None:
+    """Send a signal to the process group a command leads.
 
     Linux implements killpg(group) as kill(-group), so group 1 means every
     process this user may signal and group 0 means mutator's own group. A
@@ -77,7 +133,7 @@ def _kill_group(group: int) -> None:
 
     if group <= 1:
         raise ValueError(f"refusing to signal process group {group}")
-    os.killpg(group, signal.SIGKILL)
+    os.killpg(group, sig)
 
 
 def _end_group(group: int, patience: float = 5.0) -> None:
@@ -108,6 +164,31 @@ def display_command(command: Command) -> str:
 class CommandRunner:
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
+        self._stopping = threading.Event()
+
+    def stop(self) -> None:
+        """Stop every command this runner is running, and start no more.
+
+        Each command's own thread sees the stop within SLICE and stops it, so
+        no thread signals a command that another thread may already have reaped.
+        """
+
+        self._stopping.set()
+
+    def _communicate(self, process: subprocess.Popen, timeout: float | None) -> str:
+        """The command's output, waited for in slices. A timeout raises TimeoutExpired."""
+
+        deadline = math.inf if timeout is None else time.monotonic() + min(timeout, LONGEST_TIMEOUT)
+        while True:
+            wait = max(0.0, min(SLICE, deadline - time.monotonic()))
+            try:
+                output, _err = process.communicate(timeout=wait)
+                return output or ""
+            except subprocess.TimeoutExpired:
+                if self._stopping.is_set():
+                    raise Stopped from None
+                if time.monotonic() >= deadline:
+                    raise
 
     def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
         """Run `command` in `cwd`.
@@ -117,6 +198,8 @@ class CommandRunner:
         command the user typed in `--test-command` or `--coverage-command`.
         """
 
+        if self._stopping.is_set():
+            raise Stopped
         if self.verbose:
             print(f"+ ({cwd}) {display_command(command)}", file=sys.stderr)
         started = time.monotonic()
@@ -138,20 +221,21 @@ class CommandRunner:
             seconds = time.monotonic() - started
             result = CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
             return self._ended(cwd, result)
-        if timeout is not None:
-            timeout = min(timeout, LONGEST_TIMEOUT)
         try:
-            output, _err = process.communicate(timeout=timeout)
+            output = self._communicate(process, timeout)
             code = process.returncode if process.returncode is not None else 1
             timed_out = False
         except subprocess.TimeoutExpired:
-            _kill_group(process.pid)
-            output, _err = process.communicate()
+            output = _stop(process)
             code = 124
             timed_out = True
+        except BaseException:
+            # Ctrl-C, SIGTERM, or a stop: the command must not outlive the run.
+            _stop(process)
+            raise
         _end_group(process.pid)
         seconds = time.monotonic() - started
-        result = CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
+        result = CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output)
         return self._ended(cwd, result)
 
     def _ended(self, cwd: Path, result: CommandResult) -> CommandResult:
