@@ -540,7 +540,7 @@ def test_selection_joins_the_root_and_skips_unknown_files(tmp_path, capsys):
 def test_existing_coverage_is_not_regenerated(monkeypatch, tmp_path):
     crapper = ensure_crapper()
     calls = []
-    monkeypatch.setattr(crapper.runners, "run_coverage", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(crapper.runners, "collect_coverage", lambda *args, **kwargs: calls.append(args))
     root = tmp_path
     _prepare_coverage(parse_args(["--no-coverage", "--root", str(root)]), root, [])
     _prepare_coverage(parse_args(["--use-existing-coverage", "--root", str(root)]), root, [])
