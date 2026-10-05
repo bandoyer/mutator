@@ -18,13 +18,12 @@ Preconditions:
 
 - `$vm doctor` prints `doctor: ok`.
 - `T` is the transcript path for the feature.
-- Run each hang recipe as one sandboxed shell, so `pgrep` sees only that shell's processes: `bin/sandbox bash -c '<the recipe's commands>'`. Each `bin/sandbox` call has its own process namespace, and a process left behind dies with it, so a check in a later sandbox call proves nothing.
+- Run each hang recipe inside one `bin/sandbox` call. A process left behind dies with its sandbox, so the transcript's `processes left` section is the check, and it is written before the sandbox ends.
 
-- **limit-baseline-hang.** `project=$($vm project fixture)`. Run `$vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 1 --baseline-timeout 3 --test-command 'sleep 1000' demo.py`, then `sleep 1; pgrep -ax sleep || echo 'no test process left'`. Pass: exit code `2` after about 3 s, stderr says the baseline timed out after 3 s, no `KILLED` line, worker folders `(none)`, and `no test process left`. The bug shows as a drive that never returns.
-- **limit-control-hang.** The same, with `--test-command 'case "$PWD" in *mutation-workers*) sleep 1000;; esac; true'`. The baseline passes in the project, and the control run in worker-0 hangs. Pass: exit code `2` after about 3 s, stderr says the unmutated tests timed out in a mutation worker after 3 s, no `KILLED` line, no `.metrics/mutate/demo.edn` written, worker folders `(none)`, and `no test process left`. The bug shows as a drive that never returns.
+- **limit-baseline-hang.** `project=$($vm project fixture)`. Run `$vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 1 --baseline-timeout 3 --test-command 'sleep 1000' demo.py`. Pass: exit code `2` after about 3 s, stderr says the baseline timed out after 3 s, no `KILLED` line, worker folders `(none)`, and processes left `(none)`. The bug shows as a drive that never returns.
+- **limit-control-hang.** The same, with `--test-command 'case "$PWD" in *mutation-workers*) sleep 1000;; esac; true'`. The baseline passes in the project, and the control run in worker-0 hangs. Pass: exit code `2` after about 3 s, stderr says the unmutated tests timed out in a mutation worker after 3 s, no `KILLED` line, no `.metrics/mutate/demo.edn` written, worker folders `(none)`, and processes left `(none)`. The bug shows as a drive that never returns.
 - **limit-option.** `project=$($vm project fixture)`. Run `$vm drive "$project" "$T" --help` and `$vm drive "$project" "$T" --baseline-timeout 0 demo.py`. Pass: the help lists `--baseline-timeout <seconds>` with `Default: 600`, and the second command exits `1` with a message that the option needs a positive number.
 
 ## Gotchas
 
 - Wrap a drive that may hang in `timeout`, such as `timeout -k 2 30 $vm drive ...`, so a regression ends the recipe instead of the session. Exit `124` then means the bug is back. A drive that `timeout` kills writes no transcript, so save the console output as the proof.
-- Match the leftover by process name (`pgrep -x sleep`), not by command line. `pgrep -f 'sleep 1000'` also matches the `bash -c` that holds the recipe.

@@ -16,7 +16,7 @@ This folder is the maintained source for verifying what a mutator user sees. Rea
 
 ## Proof and skip reporting
 
-- CLI proof is the transcript: command, stdout, stderr, exit code, worker folders left, and tracked files changed.
+- CLI proof is the transcript: command, stdout, stderr, exit code, worker folders left, processes left, and tracked files changed.
 - Record the feature ID with every transcript.
 - Report an unreachable path with the attempted command and the unmet precondition.
 
