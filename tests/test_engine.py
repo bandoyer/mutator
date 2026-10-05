@@ -288,7 +288,7 @@ def test_restore_backups_puts_an_interrupted_mutant_back(tmp_path):
 COLD_BUILD = "test -f target/warm || { sleep 3; mkdir -p target && touch target/warm; }"
 
 
-def _mutate_with(tmp_path, test_command):
+def _mutate_with(tmp_path, test_command, verbose=False):
     path = tmp_path / "demo.py"
     path.write_text("def f():\n    return 1\n", encoding="utf-8")
     (tmp_path / "target").mkdir()
@@ -296,7 +296,7 @@ def _mutate_with(tmp_path, test_command):
     return mutate_file(
         path,
         tmp_path,
-        runner=CommandRunner(),
+        runner=CommandRunner(verbose=verbose),
         covered_lines=None,
         ignore_coverage=True,
         mutate_all=True,
@@ -332,3 +332,9 @@ def test_tests_that_fail_unmutated_in_a_worker_stop_the_run(tmp_path):
     assert result.baseline_failed
     assert "worker" in result.baseline_message
     assert not snapshot_path(tmp_path, "demo").exists()
+
+
+def test_verbose_names_the_mutant_timeout_and_where_it_comes_from(tmp_path, capsys):
+    _mutate_with(tmp_path, "true", verbose=True)
+
+    assert "Mutant timeout for demo.py: 2.0 s (baseline 0.0 s x 10, at least 2 s)" in capsys.readouterr().err

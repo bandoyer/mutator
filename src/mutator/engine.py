@@ -234,6 +234,9 @@ def _apply_selected(
     if not ok:
         return _baseline_failure(file_key, command, tail)
     timeout = max(2.0, seconds * timeout_factor)
+    if runner.verbose:
+        rule = f"baseline {seconds:.1f} s x {timeout_factor:g}, at least 2 s"
+        print(f"Mutant timeout for {file_key}: {timeout:.1f} s ({rule})", file=sys.stderr)
     try:
         run_mutants(
             root,
