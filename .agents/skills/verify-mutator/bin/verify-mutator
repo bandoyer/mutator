@@ -89,7 +89,7 @@ for line in open(sys.argv[1]):
         continue
     tid, text = match.groups()
     if text.endswith("<unfinished ...>"):
-        pending[tid] = text[: -len("<unfinished ...>")]
+        pending[tid] = text[: -len("<unfinished ...>")].rstrip()
     elif text.startswith("<..."):
         calls.append(pending.pop(tid, "") + text.split("resumed>", 1)[1])
     else:
