@@ -400,26 +400,26 @@ def _run_all(
         pending.put(site)
     lock = Lock()
     with ThreadPoolExecutor(max_workers=len(directories)) as pool:
-        futures = [
-            pool.submit(
-                _drain,
-                directory,
-                pending,
-                lock,
-                outcomes,
-                root,
-                relative,
-                original,
-                runner,
-                command,
-                cwd,
-                timeout,
-                baseline_timeout,
-                file_key,
-            )
-            for directory in directories
-        ]
         try:
+            futures = [
+                pool.submit(
+                    _drain,
+                    directory,
+                    pending,
+                    lock,
+                    outcomes,
+                    root,
+                    relative,
+                    original,
+                    runner,
+                    command,
+                    cwd,
+                    timeout,
+                    baseline_timeout,
+                    file_key,
+                )
+                for directory in directories
+            ]
             for future in futures:
                 future.result()
         except (KeyboardInterrupt, SystemExit):

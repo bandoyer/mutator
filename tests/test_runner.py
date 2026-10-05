@@ -286,6 +286,32 @@ def test_ctrl_c_stops_the_command_it_interrupts(tmp_path, ctrl_c_when):
     assert not late.exists()
 
 
+def test_ctrl_c_does_not_wait_for_what_a_finished_command_left_holding_its_output(tmp_path, ctrl_c_when):
+    # The shell exits at once; its background sleep keeps the output pipe open.
+    # Python's own Ctrl-C handling then reaps the shell, so its group is no longer
+    # known to be the command's, and the run must not wait for the sleep.
+    started = tmp_path / "started"
+    ctrl_c_when(started)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner().run(f"touch {started}; sleep 3 & exit 0", tmp_path, None)
+
+    assert time.time() - started.stat().st_mtime < 2.0
+
+
+def test_ctrl_c_during_the_grace_kills_the_command_at_once(tmp_path, ctrl_c_when):
+    graced = tmp_path / "graced"
+    late = tmp_path / "late"
+    ignores_sigterm = f"trap '' TERM; (sleep 0.6; touch {graced}) & sleep 2; touch {late}"
+    ctrl_c_when(graced)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner().run(ignores_sigterm, tmp_path, 0.3)
+
+    wait_until(graced, 1.8)
+    assert not late.exists()
+
+
 def test_a_timed_out_command_gets_sigterm_before_sigkill(tmp_path):
     termed = tmp_path / "termed"
     command = f"trap 'touch {termed}; exit 0' TERM; sleep 30 & wait"
@@ -327,6 +353,17 @@ def test_the_wait_comes_in_slices_and_the_last_one_ends_at_the_timeout(monkeypat
         CommandRunner()._communicate(command, 0.625)
 
     assert command.waits == [0.25, 0.25, 0.125]
+
+
+def test_an_endless_timeout_is_bounded(monkeypatch):
+    command = SlowCommand()
+    monkeypatch.setattr("mutator.runner.SLICE", 1_000_000.0)
+    monkeypatch.setattr("mutator.runner.time.monotonic", lambda: command.now)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        CommandRunner()._communicate(command, math.inf)
+
+    assert command.waits == [1_000_000.0, 1_000_000.0]
 
 
 NESTED_RUN = "import sys\nfrom mutator.cli import run\nsys.exit(run(sys.argv[1:]))\n"
@@ -375,8 +412,8 @@ def test_a_reaped_leader_is_never_signalled(monkeypatch):
     behind_popens_back = subprocess.Popen(["true"], start_new_session=True)
     os.waitpid(behind_popens_back.pid, 0)  # reaped, but returncode stays None
 
-    _signal_group(finished, signal.SIGTERM)
-    _signal_group(behind_popens_back, signal.SIGTERM)
+    assert _signal_group(finished, signal.SIGTERM) is False
+    assert _signal_group(behind_popens_back, signal.SIGTERM) is False
 
     assert behind_popens_back.returncode is None
     assert sent == []
@@ -387,9 +424,9 @@ def test_an_unreaped_leader_is_signalled_with_or_without_waitid(monkeypatch):
     monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
     running = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
-        _signal_group(running, signal.SIGTERM)
+        assert _signal_group(running, signal.SIGTERM) is True
         monkeypatch.delattr("mutator.runner.os.waitid")  # macOS before Python 3.13
-        _signal_group(running, signal.SIGKILL)
+        assert _signal_group(running, signal.SIGKILL) is True
     finally:
         running.kill()
         running.wait()

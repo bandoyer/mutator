@@ -19,6 +19,9 @@ Command = str | list[str]
 # A slice also stays far below poll()'s limit of 2**31 - 1 ms, so a huge
 # --timeout-factor or --baseline-timeout can't overflow it.
 SLICE = 0.1
+# The longest any command is waited for, about 23 days. A huge or infinite
+# --timeout-factor or --baseline-timeout gets this bound instead.
+LONGEST_TIMEOUT = 2_000_000.0
 # How long a command has to end after SIGTERM before it gets SIGKILL. A mutator
 # run nested in a test command uses it to stop its own commands and clean up.
 GRACE = 1.0
@@ -76,8 +79,8 @@ class Stopped(Exception):
     """Mutator is stopping, so the command was stopped or never started."""
 
 
-def _signal_group(process: subprocess.Popen, sig: int) -> None:
-    """Signal the command's group while its leader is unreaped.
+def _signal_group(process: subprocess.Popen, sig: int) -> bool:
+    """Signal the command's group while its leader is unreaped. Return whether it did.
 
     Until the leader is reaped, even as a zombie, its pid stays the id of its
     group, so the signal reaches only the command's processes. Popen sets
@@ -88,24 +91,35 @@ def _signal_group(process: subprocess.Popen, sig: int) -> None:
     """
 
     if process.returncode is not None:
-        return
+        return False
     if hasattr(os, "waitid"):  # macOS has it from Python 3.13
         try:
             os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
-            return
+            return False
     _kill_group(process.pid, sig)
+    return True
 
 
 def _stop(process: subprocess.Popen) -> str:
-    """SIGTERM the command's group, give it GRACE to end, then SIGKILL it. Return its output."""
+    """SIGTERM the command's group, give it GRACE to end, then SIGKILL it. Return its output.
+
+    When the leader is already reaped, the group can't be signalled safely, so
+    nothing that still holds the command's output is waited for. Python's own
+    Ctrl-C handling in communicate() can reap a leader that has exited.
+    """
 
     _signal_group(process, signal.SIGTERM)
     try:
         output, _err = process.communicate(timeout=GRACE)
     except subprocess.TimeoutExpired:
-        _signal_group(process, signal.SIGKILL)
+        if not _signal_group(process, signal.SIGKILL):
+            return ""
         output, _err = process.communicate()
+    except BaseException:
+        # Ctrl-C or SIGTERM during the grace: don't wait it out.
+        _signal_group(process, signal.SIGKILL)
+        raise
     return output or ""
 
 
@@ -164,7 +178,7 @@ class CommandRunner:
     def _communicate(self, process: subprocess.Popen, timeout: float | None) -> str:
         """The command's output, waited for in slices. A timeout raises TimeoutExpired."""
 
-        deadline = math.inf if timeout is None else time.monotonic() + timeout
+        deadline = math.inf if timeout is None else time.monotonic() + min(timeout, LONGEST_TIMEOUT)
         while True:
             wait = max(0.0, min(SLICE, deadline - time.monotonic()))
             try:
