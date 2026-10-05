@@ -12,6 +12,11 @@ jobs:
       matrix:
         # The lowest Python pyproject.toml allows, and the newest.
         python-version: ["3.11", "3.14"]
+        deps: [current]
+        include:
+          # Every direct dependency at the lowest version pyproject.toml allows.
+          - python-version: "3.11"
+            deps: minimum
     steps:
       # mutator imports crapper from a checkout next to it.
       - uses: actions/checkout@v4
@@ -24,6 +29,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e "./mutator[dev]"
+      - if: matrix.deps == 'current'
+        run: pip install -e "./mutator[dev]"
+      - if: matrix.deps == 'minimum'
+        run: pip install uv && uv pip install --system --resolution lowest-direct -e "./mutator[dev]"
       - run: python -m pytest -q
         working-directory: mutator

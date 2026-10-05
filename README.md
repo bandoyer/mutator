@@ -112,7 +112,7 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | Rust | `cargo test` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
 
-Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
+Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A default run reads only the reports those commands wrote in this run, so an earlier or hand-made report on disk is ignored and left in place. `--use-existing-coverage`, `--coverage-command`, and `--scan` read every report on disk. This needs a crapper checkout with `collect_coverage` (bandoyer/crapper#28). A file missing from the report is treated as uncovered, and the run says so.
 
 ## Development
 

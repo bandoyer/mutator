@@ -128,7 +128,9 @@ def _covered_from_pairs(lines: dict[int, tuple[int, int]] | None) -> set[int] | 
     return {number for number, (covered, _total) in lines.items() if covered > 0}
 
 
-def _jacoco_paths(root: Path) -> list[Path]:
+def _jacoco_paths(root: Path, reports) -> list[Path]:
+    if reports is not None:
+        return [report.path for report in reports if report.path.name == "jacoco.xml"]
     paths = [root / "target" / "site" / "jacoco" / "jacoco.xml"]
     paths.extend(root.glob("*/target/site/jacoco/jacoco.xml"))
     paths.extend(root.glob("*/*/target/site/jacoco/jacoco.xml"))
@@ -176,11 +178,11 @@ def _read_jacoco(path: Path, crapper):
         return None
 
 
-def _jacoco_index(root: Path) -> dict[str, set[int]]:
+def _jacoco_index(root: Path, reports=None) -> dict[str, set[int]]:
     crapper = ensure_crapper()
     found: dict[str, set[int]] = {}
     seen: set[Path] = set()
-    for path in _jacoco_paths(root):
+    for path in _jacoco_paths(root, reports):
         if not path.is_file():
             continue
         resolved = path.resolve()
@@ -209,14 +211,17 @@ def _go_lines(profile, source_path: str) -> set[int] | None:
     return covered
 
 
-def covered_lines(root: Path, source_path: Path, language: str) -> set[int] | None:
-    """Lines with a hit, or None when this file is absent from coverage."""
+def covered_lines(root: Path, source_path: Path, language: str, reports=None) -> set[int] | None:
+    """Lines with a hit, or None when this file is absent from coverage.
+
+    `reports` are the reports to read; None reads every report on disk.
+    """
 
     crapper = ensure_crapper()
     path = source_path.resolve().as_posix()
     if language == "java":
-        return _lookup(_jacoco_index(root), path)
-    bundle = crapper.coverage.load_bundle(root)
+        return _lookup(_jacoco_index(root, reports), path)
+    bundle = crapper.coverage.load_bundle(root, reports)
     if language == "go":
         return _go_lines(bundle.go_profile, path)
     if language == "clojure":

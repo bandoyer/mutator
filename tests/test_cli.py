@@ -1,11 +1,14 @@
+import re
 import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
 from mutator.cli import parse_args, run
+from mutator.crapper_link import ensure_crapper
 from mutator.runner import CommandResult
 
 
@@ -133,7 +136,7 @@ def _demo(tmp_path):
 def test_sigterm_during_a_run_exits_143_and_the_old_handler_comes_back(tmp_path, monkeypatch):
     exits = []
 
-    def mutate(options, root, files):
+    def mutate(options, root, files, reports):
         handler = signal.getsignal(signal.SIGTERM)
         with pytest.raises(SystemExit) as stop:
             handler(signal.SIGTERM, None)
@@ -151,7 +154,7 @@ def test_sigterm_during_a_run_exits_143_and_the_old_handler_comes_back(tmp_path,
 def test_a_run_off_the_main_thread_works_and_installs_no_handler(tmp_path, monkeypatch):
     seen = []
 
-    def mutate(options, root, files):
+    def mutate(options, root, files, reports):
         seen.append(signal.getsignal(signal.SIGTERM))
         return 0
 
@@ -164,3 +167,139 @@ def test_a_run_off_the_main_thread_works_and_installs_no_handler(tmp_path, monke
 
     assert codes == [0]
     assert seen == [before]
+
+
+_PY_TOML = "[tool.pytest.ini_options]\npythonpath = ['src']\n"
+_PY_DEMO = "def tick():\n    return 1 == 1\n\n\ndef tock():\n    return 2 == 2\n"
+_RS_LIB = "pub fn tick() -> i32 {\n    1\n}\n\npub fn tock() -> i32 {\n    1\n}\n"
+_GO_CLOCK = "package clock\n\nfunc Tick() int {\n\treturn 1\n}\n\nfunc Tock() int {\n\treturn 1\n}\n"
+_JAVA_CLOCK = (
+    "package demo;\n\npublic class Clock {\n    public int tick() {\n        return 1;\n    }\n\n"
+    "    public int tock() {\n        return 1;\n    }\n}\n"
+)
+# JaCoCo: tick's return (line 5) executed, tock's (line 9) missed.
+_JACOCO = (
+    '<report name="demo"><package name="demo"><sourcefile name="Clock.java">'
+    '<line nr="5" mi="0" ci="2" mb="0" cb="0"/><line nr="9" mi="2" ci="0" mb="0" cb="0"/>'
+    "</sourcefile></package></report>\n"
+)
+# A report this run's tools didn't write: every line of the file hit.
+_PY_LEFTOVER = "SF:src/demo.py\nDA:1,1\nDA:2,1\nDA:5,1\nDA:6,1\nend_of_record\n"
+_PY_FRESH = "SF:src/demo.py\nDA:1,1\nDA:2,1\nDA:5,0\nDA:6,0\nend_of_record\n"
+_PY_PROJECT = {"pyproject.toml": _PY_TOML, "src/demo.py": _PY_DEMO, "coverage/lcov.info": _PY_LEFTOVER}
+
+
+def _coverage_tools(root: Path, fresh: dict[str, str]):
+    """Each coverage tool, faked at the process boundary: in module folder `m`, it writes
+    `fresh[m]` where its command line says. `{root}` in the text is the project folder's name.
+    """
+
+    def shell(command, cwd):
+        if command[1:4] == ["-m", "coverage", "run"]:
+            Path(command[4].split("=", 1)[1]).touch()
+            return 0
+        module = Path(cwd).resolve()
+        module = module.relative_to(root.resolve()).as_posix() if module.is_relative_to(root.resolve()) else None
+        if module not in fresh:
+            return 0
+        if command[:2] == ["go", "test"]:
+            report = Path(command[-1].split("=", 1)[1])
+        elif command[0] == "mvn":
+            report = Path(cwd) / "target" / "site" / "jacoco" / "jacoco.xml"
+        elif command[1:4] == ["-m", "coverage", "lcov"]:
+            report = Path(command[-1])
+        else:
+            return 0
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(fresh[module].replace("{root}", root.name), encoding="utf-8")
+        return 0
+
+    return shell
+
+
+@pytest.mark.parametrize(
+    ("files", "fresh", "args", "want"),
+    [
+        pytest.param(
+            _PY_PROJECT, {".": _PY_FRESH}, [], {"src/demo.py": ({2}, {6})}, id="py-leftover"
+        ),
+        pytest.param(
+            _PY_PROJECT,
+            {".": _PY_FRESH},
+            ["--use-existing-coverage"],
+            {"src/demo.py": ({2, 6}, set())},
+            id="py-leftover-existing",
+        ),
+        pytest.param(
+            {
+                "Cargo.toml": "[package]\nname = 'clock'\n",
+                "src/lib.rs": _RS_LIB,
+                "coverage/lcov.info": "SF:src/lib.rs\nDA:5,1\nDA:6,1\nDA:7,1\nend_of_record\n",
+            },
+            {},
+            [],
+            {"src/lib.rs": (set(), {2, 6})},
+            id="rust-no-tool",
+        ),
+        pytest.param(
+            {
+                "one/pyproject.toml": _PY_TOML,
+                "one/src/core.py": "def work():\n    return 1 == 1\n",
+                "two/pyproject.toml": _PY_TOML,
+                "two/src/core.py": "def work():\n    return 1 == 1\n",
+            },
+            {
+                "one": "SF:src/core.py\nDA:1,1\nDA:2,1\nend_of_record\n",
+                "two": "SF:src/core.py\nDA:1,0\nDA:2,0\nend_of_record\n",
+            },
+            [],
+            {"one/src/core.py": ({2}, set()), "two/src/core.py": (set(), {2})},
+            id="py-two-pkgs",
+        ),
+        pytest.param(
+            {"a/b/c/go.mod": "module {root}/a/b/c\n", "a/b/c/clock.go": _GO_CLOCK},
+            {"a/b/c": "mode: set\n{root}/a/b/c/clock.go:3.17,5.2 1 1\n{root}/a/b/c/clock.go:7.17,9.2 1 0\n"},
+            [],
+            {"a/b/c/clock.go": ({4}, {8})},
+            id="go-deep-module",
+        ),
+        pytest.param(
+            {"clock.go": _GO_CLOCK, "coverage.out": "mode: set\n{root}/clock.go:3.17,5.2 1 1\n"},
+            {},
+            [],
+            {"clock.go": (set(), {4, 8})},
+            id="go-no-module",
+        ),
+        pytest.param(
+            {"a/b/c/pom.xml": "<project/>\n", "a/b/c/src/main/java/demo/Clock.java": _JAVA_CLOCK},
+            {"a/b/c": _JACOCO},
+            [],
+            {"a/b/c/src/main/java/demo/Clock.java": ({5}, {9})},
+            id="java-deep-module",
+        ),
+        pytest.param(
+            {"src/main/java/demo/Clock.java": _JAVA_CLOCK, "target/site/jacoco/jacoco.xml": _JACOCO},
+            {},
+            [],
+            {"src/main/java/demo/Clock.java": (set(), {5, 9})},
+            id="java-no-pom",
+        ),
+    ],
+)
+def test_a_default_run_reads_only_the_reports_this_run_wrote(tmp_path, monkeypatch, capsys, files, fresh, args, want):
+    for relative, text in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text.replace("{root}", tmp_path.name), encoding="utf-8")
+    runners = ensure_crapper().runners
+    monkeypatch.setattr(runners, "run_shell", _coverage_tools(tmp_path, fresh))
+    monkeypatch.setattr(runners.shutil, "which", lambda _name: None)
+    sources = [str(tmp_path / relative) for relative in want]
+    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+    run([*command, *args, *sources])
+    got: dict[str, tuple[set[int], set[int]]] = {relative: (set(), set()) for relative in want}
+    for status, relative, line in re.findall(r"^(SURVIVED|UNCOVERED) +(\S+):(\d+) ", capsys.readouterr().out, re.M):
+        got[relative][status == "UNCOVERED"].add(int(line))
+    assert got == want
+    for relative in files:
+        assert (tmp_path / relative).is_file(), f"{relative} was deleted"

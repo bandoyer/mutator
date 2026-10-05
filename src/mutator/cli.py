@@ -448,15 +448,18 @@ def select_files(options: Options) -> list[Path]:
     return sorted(set(_inside_root(_matching(files, filters), root)), key=lambda item: item.as_posix())
 
 
-def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> int:
-    """Run coverage generation. A failed command's code is returned as-is.
+def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> tuple[int, list | None]:
+    """Run coverage generation. Return a failed command's code as-is, and the reports to read.
 
-    Reports already on disk are left unread when the command fails, so a stale
-    100% report cannot score the run.
+    A default run reads only the reports crapper's tools wrote in this run, so an
+    earlier or hand-made report can't mark a line as hit. The reports are None
+    for `--use-existing-coverage`, `--coverage-command`, and `--scan`, which read
+    every report on disk. Reports already on disk are left unread when the
+    command fails, so a stale 100% report cannot score the run.
     """
 
     if options.no_coverage or options.use_existing_coverage or options.scan:
-        return 0
+        return 0, None
     if options.coverage_command:
         result = CommandRunner(verbose=options.verbose).run(options.coverage_command, root, None)
         if result.code != 0:
@@ -467,23 +470,19 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> int:
             tail = "\n".join(result.output.splitlines()[-20:])
             if tail:
                 print(tail, file=sys.stderr)
-            return result.code
-        return 0
-    crapper = ensure_crapper()
-    code = crapper.runners.run_coverage(root, files, None)
-    if isinstance(code, int) and code != 0:
-        return code
-    return 0
+            return result.code, None
+        return 0, None
+    return 0, ensure_crapper().runners.collect_coverage(root, files)
 
 
-def _coverage_for(options: Options, root: Path, path: Path) -> set[int] | None:
+def _coverage_for(options: Options, root: Path, path: Path, reports=None) -> set[int] | None:
     if options.no_coverage:
         return None
     crapper = ensure_crapper()
     language = crapper.discover.language_of(path)
     if language is None:
         return None
-    return covered_lines(root, path, language)
+    return covered_lines(root, path, language, reports)
 
 
 def _print_help(options: Options) -> int:
@@ -553,7 +552,7 @@ def _finish(baseline_failed: bool, survived: bool) -> int:
     return 0
 
 
-def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
+def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> int:
     runner = CommandRunner(verbose=options.verbose)
     baselines: dict[tuple[tuple[str, ...], str], CommandResult] = {}
     forms = []
@@ -565,7 +564,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
             path,
             root,
             runner=runner,
-            covered_lines=_coverage_for(options, root, path),
+            covered_lines=_coverage_for(options, root, path, reports),
             ignore_coverage=options.no_coverage,
             mutate_all=options.mutate_all,
             lines=options.lines,
@@ -630,12 +629,12 @@ def _run(argv: list[str] | None) -> int:
         return 0
     if not options.scan and _differing_backups(root):
         return 1
-    coverage = _prepare_coverage(options, root, files)
+    coverage, reports = _prepare_coverage(options, root, files)
     if coverage != 0:
         return coverage
     if options.scan:
         return _scan(options, root, files)
-    return _mutate_files(options, root, files)
+    return _mutate_files(options, root, files, reports)
 
 
 def main(argv: list[str] | None = None) -> None:
