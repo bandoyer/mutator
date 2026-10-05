@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
@@ -10,9 +11,9 @@ from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
-from mutator.engine import mutate_file, restore_backups, scan_file
+from mutator.engine import BASELINE_TIMEOUT, mutate_file, restore_backups, scan_file
 from mutator.report import format_results, format_site_log
-from mutator.runner import CommandRunner
+from mutator.runner import CommandResult, CommandRunner
 
 
 def _skipped_directory_text() -> str:
@@ -91,6 +92,9 @@ Options:
   --timeout-factor <number>     Mutant timeout, as a multiple of the baseline
                                 duration. Default: 10. The timeout is at least
                                 2 seconds.
+  --baseline-timeout <seconds>  Stop when the unmutated tests run longer than
+                                this, in the project or in a worker.
+                                Default: {BASELINE_TIMEOUT:g}.
   --mutation-warning <number>   Warn when a file selects more covered sites
                                 than this. Default: 50.
   --max-workers <number>        Run at most this many mutants of one file at
@@ -152,6 +156,7 @@ class Options:
     coverage_command: str | None = None
     test_command: str | None = None
     timeout_factor: float = 10.0
+    baseline_timeout: float = BASELINE_TIMEOUT
     mutation_warning: int = 50
     max_workers: int | None = None
     changed: bool = False
@@ -218,6 +223,12 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 options.timeout_factor = float(_take(args, index, arg))
                 if options.timeout_factor <= 0:
                     raise ValueError("--timeout-factor requires a positive number")
+                index += 2
+                continue
+            if arg == "--baseline-timeout":
+                options.baseline_timeout = float(_take(args, index, arg))
+                if not 0 < options.baseline_timeout < math.inf:
+                    raise ValueError("--baseline-timeout requires a finite positive number")
                 index += 2
                 continue
             if arg == "--mutation-warning":
@@ -529,7 +540,7 @@ def _finish(baseline_failed: bool, survived: bool) -> int:
 
 def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
     runner = CommandRunner(verbose=options.verbose)
-    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]] = {}
+    baselines: dict[tuple[tuple[str, ...], str], CommandResult] = {}
     forms = []
     written: list[str] = []
     baseline_failed = False
@@ -548,6 +559,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
             mutation_warning=options.mutation_warning,
             baselines=baselines,
             max_workers=options.max_workers,
+            baseline_timeout=options.baseline_timeout,
         )
         outcome = _record(result, forms, written)
         if outcome == "baseline":

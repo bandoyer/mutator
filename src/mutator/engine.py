@@ -10,8 +10,12 @@ from mutator.functions import form_digests, form_spans, sites_in_file
 from mutator.metrics import load_history, source_key, write_results
 from mutator.model import FormResult, RunResult, Site
 from mutator.report import format_scan
-from mutator.runner import Command, CommandRunner, display_command, test_plan
+from mutator.runner import Command, CommandResult, CommandRunner, display_command, test_plan
 from mutator.workers import WorkerFailed, run_mutants
+
+# The unmutated runs can't use the mutant timeout: the baseline sets it, and a
+# worker's control run is a cold build that can be much slower than the baseline.
+BASELINE_TIMEOUT = 600.0
 
 
 def restore_backups(root: Path) -> list[Path]:
@@ -188,14 +192,15 @@ def _command_key(command: Command) -> tuple[str, ...]:
     return ("argv", *command)
 
 
-def _remember_baseline(baselines, cache_key, runner, command: Command, cwd: Path) -> None:
-    if cache_key in baselines:
-        return
-    baseline = runner.run(command, cwd, None)
-    if baseline.code != 0:
-        baselines[cache_key] = (False, baseline.seconds, _tail(baseline.output))
-        return
-    baselines[cache_key] = (True, baseline.seconds, "")
+def _remember_baseline(baselines, cache_key, runner, command: Command, cwd: Path, limit: float) -> None:
+    if cache_key not in baselines:
+        baselines[cache_key] = runner.run(command, cwd, limit)
+
+
+def _how(result: CommandResult, limit: float) -> str:
+    if result.timed_out:
+        return f"timed out after {limit:g} s"
+    return "failed"
 
 
 def _tail(output: str) -> str:
@@ -203,7 +208,7 @@ def _tail(output: str) -> str:
 
 
 def _baseline_failure(
-    file_key: str, command: Command, tail: str, failed: str = "Baseline failed"
+    file_key: str, command: Command, tail: str, failed: str
 ) -> RunResult:
     message = f"{failed} for {file_key}: {display_command(command)}"
     if tail:
@@ -224,15 +229,18 @@ def _apply_selected(
     baselines,
     outcomes,
     max_workers,
+    baseline_timeout,
 ) -> RunResult | None:
     if not selected:
         return None
     command, cwd = test_plan(root, path, language, test_command)
     cache_key = (_command_key(command), str(cwd))
-    _remember_baseline(baselines, cache_key, runner, command, cwd)
-    ok, seconds, tail = baselines[cache_key]
-    if not ok:
-        return _baseline_failure(file_key, command, tail)
+    _remember_baseline(baselines, cache_key, runner, command, cwd, baseline_timeout)
+    baseline = baselines[cache_key]
+    if baseline.code != 0:
+        failed = f"Baseline {_how(baseline, baseline_timeout)}"
+        return _baseline_failure(file_key, command, _tail(baseline.output), failed)
+    seconds = baseline.seconds
     timeout = max(2.0, seconds * timeout_factor)
     if runner.verbose:
         rule = f"baseline {seconds:.1f} s x {timeout_factor:g}, at least 2 s"
@@ -248,12 +256,13 @@ def _apply_selected(
             command,
             cwd,
             timeout,
+            baseline_timeout,
             file_key,
             outcomes,
         )
     except WorkerFailed as failure:
-        failed = "Unmutated tests failed in a mutation worker"
-        return _baseline_failure(file_key, command, _tail(failure.output), failed)
+        failed = f"Unmutated tests {_how(failure.result, baseline_timeout)} in a mutation worker"
+        return _baseline_failure(file_key, command, _tail(failure.result.output), failed)
     return None
 
 
@@ -284,8 +293,9 @@ def mutate_file(
     test_command: str | None,
     timeout_factor: float,
     mutation_warning: int,
-    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]],
+    baselines: dict[tuple[tuple[str, ...], str], CommandResult],
     max_workers: int | None = None,
+    baseline_timeout: float = BASELINE_TIMEOUT,
 ) -> RunResult:
     """Mutate one file and write its namespaces into `.metrics/mutate`."""
 
@@ -321,6 +331,7 @@ def mutate_file(
         baselines,
         outcomes,
         max_workers,
+        baseline_timeout,
     )
     if failure is not None:
         return failure

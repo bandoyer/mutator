@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 
-from mutator.engine import mutate_file, restore_backups
+from mutator.engine import BASELINE_TIMEOUT, mutate_file, restore_backups
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult, CommandRunner
@@ -246,10 +246,10 @@ def test_a_mutation_run_leaves_the_project_tree_unchanged(tmp_path):
         verbose = False
 
         def run(self, command, cwd, timeout):
-            if timeout is not None:
+            if timeout != BASELINE_TIMEOUT:
                 assert "mutation-workers" in cwd.as_posix()
                 assert (cwd / "src" / "demo.py").read_text(encoding="utf-8") != original
-            return CommandResult(code=0 if timeout is None else 1, timed_out=False, seconds=0.01, output="")
+            return CommandResult(code=0 if timeout == BASELINE_TIMEOUT else 1, timed_out=False, seconds=0.01, output="")
 
     mutate_file(
         path,
@@ -288,7 +288,7 @@ def test_restore_backups_puts_an_interrupted_mutant_back(tmp_path):
 COLD_BUILD = "test -f target/warm || { sleep 3; mkdir -p target && touch target/warm; }"
 
 
-def _mutate_with(tmp_path, test_command, verbose=False):
+def _mutate_with(tmp_path, test_command, verbose=False, **limits):
     path = tmp_path / "demo.py"
     path.write_text("def f():\n    return 1\n", encoding="utf-8")
     (tmp_path / "target").mkdir()
@@ -306,6 +306,7 @@ def _mutate_with(tmp_path, test_command, verbose=False):
         mutation_warning=50,
         baselines={},
         max_workers=1,
+        **limits,
     )
 
 
@@ -332,6 +333,26 @@ def test_tests_that_fail_unmutated_in_a_worker_stop_the_run(tmp_path):
     assert result.baseline_failed
     assert "worker" in result.baseline_message
     assert not snapshot_path(tmp_path, "demo").exists()
+
+
+def test_a_hanging_baseline_stops_at_the_baseline_timeout(tmp_path):
+    started = time.monotonic()
+    result = _mutate_with(tmp_path, "sleep 30", baseline_timeout=1)
+
+    assert result.baseline_failed
+    assert "Baseline timed out after 1 s for demo.py: sleep 30" in result.baseline_message
+    assert time.monotonic() - started < 15
+
+
+def test_a_hanging_control_run_stops_at_the_baseline_timeout(tmp_path):
+    hang_in_worker = 'case "$PWD" in *mutation-workers*) sleep 30;; esac; true'
+    started = time.monotonic()
+    result = _mutate_with(tmp_path, hang_in_worker, baseline_timeout=1)
+
+    assert result.baseline_failed
+    assert "Unmutated tests timed out after 1 s in a mutation worker for demo.py" in result.baseline_message
+    assert not snapshot_path(tmp_path, "demo").exists()
+    assert time.monotonic() - started < 15
 
 
 def test_verbose_names_the_mutant_timeout_and_where_it_comes_from(tmp_path, capsys):

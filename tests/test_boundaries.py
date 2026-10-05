@@ -27,6 +27,7 @@ from mutator.coverage import _candidates, _jacoco_index, covered_lines
 from mutator.crapper_link import ensure_crapper
 from mutator.edn import loads
 from mutator.engine import (
+    BASELINE_TIMEOUT,
     _backup,
     _carry_forward,
     _covered,
@@ -127,7 +128,7 @@ class _Ok:
     def run(self, command, cwd, timeout):
         with self._lock:
             self.timeouts.append(timeout)
-        code = 0 if timeout is None else 1
+        code = 0 if timeout == BASELINE_TIMEOUT else 1
         return CommandResult(code=code, timed_out=False, seconds=self.seconds, output="")
 
 
@@ -373,6 +374,11 @@ def test_options_reject_bad_values_and_keep_flag_defaults(monkeypatch):
     assert parse_args(["--timeout-factor", "1"]).timeout_factor == 1
     assert parse_args(["--timeout-factor", "0"]).exit_code == 1
     assert parse_args(["--timeout-factor", "-1"]).exit_code == 1
+    assert parse_args([]).baseline_timeout == 600
+    assert parse_args(["--baseline-timeout", "1.5"]).baseline_timeout == 1.5
+    assert parse_args(["--baseline-timeout", "0"]).exit_code == 1
+    assert parse_args(["--baseline-timeout", "inf"]).exit_code == 1
+    assert parse_args(["--baseline-timeout", "nan"]).exit_code == 1
     assert parse_args(["--use-existing-coverage"]).use_existing_coverage is True
     assert parse_args(["--reuse-coverage"]).use_existing_coverage is True
     assert parse_args(["--verbose"]).verbose is True
@@ -577,6 +583,23 @@ def test_cli_exit_codes_follow_kills_baseline_failure_and_an_empty_tree(tmp_path
     assert code == 2
     assert snapshot.read_text(encoding="utf-8") == recorded
 
+    hanging = f"{sys.executable} -c 'import time; time.sleep(30)'"
+    code = run(
+        [
+            "--no-coverage",
+            "--mutate-all",
+            "--root",
+            str(tmp_path),
+            "--baseline-timeout",
+            "1",
+            "--test-command",
+            hanging,
+            "src/demo.py",
+        ]
+    )
+    assert code == 2
+    assert "Baseline timed out after 1 s" in capsys.readouterr().err
+
 
 def test_a_scan_does_not_restore_a_backup_and_a_run_does(tmp_path, capsys):
     source = tmp_path / "src" / "demo.py"
@@ -721,8 +744,8 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
         mutation_warning=50,
         baselines={},
     )
-    assert clock.timeouts[0] is None
-    assert [timeout for timeout in clock.timeouts if timeout is not None] == [300, 300]
+    assert clock.timeouts[0] == BASELINE_TIMEOUT
+    assert [timeout for timeout in clock.timeouts if timeout != BASELINE_TIMEOUT] == [300, 300]
 
     class Red:
         verbose = False
@@ -816,11 +839,11 @@ def test_a_missing_backup_is_not_unlinked_again(tmp_path):
         verbose = False
 
         def run(self, command, cwd, timeout):
-            if timeout is not None:
+            if timeout != BASELINE_TIMEOUT:
                 for backup in (cwd / "target" / "mutator-backup").rglob("*"):
                     if backup.is_file():
                         backup.unlink()
-            return CommandResult(code=0 if timeout is None else 1, timed_out=False, seconds=0.01, output="")
+            return CommandResult(code=0 if timeout == BASELINE_TIMEOUT else 1, timed_out=False, seconds=0.01, output="")
 
     mutate_file(
         path,

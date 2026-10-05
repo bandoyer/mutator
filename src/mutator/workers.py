@@ -18,7 +18,7 @@ from queue import Empty, Queue
 from threading import Lock
 
 from mutator.model import Site
-from mutator.runner import Command
+from mutator.runner import Command, CommandResult
 from mutator.sites import apply_site
 
 # Build output and the worker tree itself must not be shared. A link to
@@ -73,11 +73,11 @@ CONFIGS = (
 
 
 class WorkerFailed(Exception):
-    """The unmutated tests failed in a worker, so a failing mutant there proves nothing."""
+    """The unmutated tests failed or timed out in a worker, so a failing mutant there proves nothing."""
 
-    def __init__(self, output: str):
-        super().__init__(output)
-        self.output = output
+    def __init__(self, result: CommandResult):
+        super().__init__(result.output)
+        self.result = result
 
 
 def worker_count(site_count: int, requested: int | None) -> int:
@@ -344,14 +344,15 @@ def _drain(
     command: Command,
     cwd: Path,
     timeout: float,
+    baseline_timeout: float,
     file_key: str,
 ) -> None:
     # The worker shares no build output with the project. This unmutated run
     # builds it, so mutant runs start as warm as the baseline did and its
     # timeout is fair. It also proves the tests can pass in the worker at all.
-    control = runner.run(command, mapped_cwd(directory, root, cwd), None)
+    control = runner.run(command, mapped_cwd(directory, root, cwd), baseline_timeout)
     if control.code != 0:
-        raise WorkerFailed(control.output)
+        raise WorkerFailed(control)
     while True:
         try:
             site = pending.get_nowait()
@@ -391,6 +392,7 @@ def _run_all(
     command: Command,
     cwd: Path,
     timeout: float,
+    baseline_timeout: float,
     file_key: str,
 ) -> None:
     pending: Queue = Queue()
@@ -412,6 +414,7 @@ def _run_all(
                 command,
                 cwd,
                 timeout,
+                baseline_timeout,
                 file_key,
             )
             for directory in directories
@@ -430,6 +433,7 @@ def run_mutants(
     command: Command,
     cwd: Path,
     timeout: float,
+    baseline_timeout: float,
     file_key: str,
     outcomes: dict[str, str],
 ) -> None:
@@ -454,6 +458,7 @@ def run_mutants(
             command,
             cwd,
             timeout,
+            baseline_timeout,
             file_key,
         )
     finally:
