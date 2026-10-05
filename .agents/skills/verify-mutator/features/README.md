@@ -24,4 +24,5 @@ This folder is the maintained source for verifying what a mutator user sees. Rea
 
 - [Mutate a file](./mutate-file.md) covers killing every mutant, a surviving mutant, and listing sites with `--scan`.
 - [Worker cleanup](./worker-cleanup.md) covers removing every worker folder, including when the test command leaves a process running in the worker.
+- [Control runs](./control-run.md) covers each worker's run of the unmutated tests before its first mutant: a cold worker build doesn't turn mutants into timeouts, and a worker whose unmutated tests fail stops the run.
 - [A project's measure script](./project-measure.md) covers a real project's own script that calls mutator, such as bujo's `scripts/measure`.

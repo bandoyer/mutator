@@ -722,7 +722,7 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
         baselines={},
     )
     assert clock.timeouts[0] is None
-    assert clock.timeouts[1] == 300
+    assert [timeout for timeout in clock.timeouts if timeout is not None] == [300, 300]
 
     class Red:
         verbose = False

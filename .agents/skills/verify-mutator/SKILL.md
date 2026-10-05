@@ -31,6 +31,7 @@ It runs no mutants and changes no project file. Its `./mutator --help` call crea
 
 ```bash
 project=$($vm project fixture)               # Python fixture: demo.py, test_demo.py, pyproject.toml, in its own git repo
+project=$($vm project cold-build)            # Cargo fixture whose first build takes 6 s and whose one test can't fail
 project=$($vm project ~/Work/bujo)           # or a fresh git clone of a real project (committed files only)
 $vm drive "$project" <transcript> --no-coverage demo.py
 $vm exec "$project" <transcript> scripts/measure
@@ -64,4 +65,4 @@ This removes only a scratch folder that `$vm project` created (`$TMPDIR/mutator-
 
 ## Helpers
 
-`bin/verify-mutator` subcommands: `doctor`, `project fixture | <git repo>`, `drive <project> <transcript> [mutator args...]`, `exec <project> <transcript> <command> [args...]`, `cleanup <project>`. Running it with no arguments prints usage.
+`bin/verify-mutator` subcommands: `doctor`, `project fixture | cold-build | <git repo>`, `drive <project> <transcript> [mutator args...]`, `exec <project> <transcript> <command> [args...]`, `cleanup <project>`. Running it with no arguments prints usage.

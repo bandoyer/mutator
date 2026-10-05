@@ -22,5 +22,5 @@ Preconditions:
 ## Gotchas
 
 - The clone builds bujo from cold, so the first run spends time in `cargo`.
-- bujo's mutants all time out today, because each worker builds from cold against a 2 s timeout. mutator counts a timeout as a kill, so don't read the kill count as test strength.
+- Before control runs, every bujo mutant timed out, because each worker built clap and jiff from cold against a 2 s timeout. mutator counts a timeout as a kill. [Control runs](./control-run.md) has the recipe that shows whether kills come from the tests.
 - bujo's `mise.toml` must be trusted in the clone and its workers. The helper sets `MISE_TRUSTED_CONFIG_PATHS` for that.

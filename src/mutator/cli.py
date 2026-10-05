@@ -119,7 +119,7 @@ interrupted older run is restored before a non-scan run.
 Exit codes:
   0  every executed mutant was killed, or there was nothing to run
   1  usage error
-  2  baseline tests failed
+  2  baseline tests failed, in the project or in a worker
   3  at least one mutant survived
 
 Coverage, when it is produced, uses the same commands as crapper:
