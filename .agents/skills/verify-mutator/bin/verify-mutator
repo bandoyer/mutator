@@ -28,6 +28,7 @@ usage: verify-mutator doctor
        verify-mutator drive <project> <transcript> [mutator args...]
        verify-mutator exec <project> <transcript> <command> [args...]
        verify-mutator signal <project> <transcript> TERM|INT <seconds> [mutator args...]
+       verify-mutator trace <project> <transcript> [mutator args...]
        verify-mutator cleanup <project>
 USAGE
   exit 2
@@ -72,6 +73,48 @@ leftover_processes() {
     [[ $cwd == "$project" || $cwd == "$project/"* ]] || continue
     echo "${entry#/proc/} $(tr '\0' ' ' <"$entry/cmdline" 2>/dev/null)"
   done
+}
+
+# Reads an `strace -f` log of kill, wait4, waitid, and the fork calls, and prints each
+# group signal (other than 0) sent after the wait that reaped that group's leader. From
+# then on the group id is no longer known to be the command's own (issue #44).
+signals_after_reap() {
+  "$repo/.venv/bin/python" - "$1" <<'PY'
+import re, sys
+
+pending, calls = {}, []
+for line in open(sys.argv[1]):
+    match = re.match(r"^(\d+)\s+(.*)$", line.rstrip("\n"))
+    if not match:
+        continue
+    tid, text = match.groups()
+    if text.endswith("<unfinished ...>"):
+        pending[tid] = text[: -len("<unfinished ...>")]
+    elif text.startswith("<..."):
+        calls.append(pending.pop(tid, "") + text.split("resumed>", 1)[1])
+    else:
+        calls.append(text)
+reaped, signals, late = set(), 0, []
+for call in calls:
+    name = call.split("(", 1)[0]
+    result = call.rsplit("= ", 1)[-1].split(" ")[0]
+    if name in ("clone", "clone3", "fork", "vfork") and result.isdigit():
+        reaped.discard(int(result))  # a new task with this number
+    elif name == "wait4" and result.isdigit() and int(result) > 0:
+        reaped.add(int(result))
+    elif name == "waitid" and "WNOWAIT" not in call:
+        found = re.search(r"si_pid=(\d+)", call)
+        if found:
+            reaped.add(int(found.group(1)))
+    elif name == "kill":
+        found = re.match(r"kill\(-(\d+), (\w+)\)", call)
+        if found and found.group(2) != "0":
+            signals += 1
+            if int(found.group(1)) in reaped:
+                late.append(call)
+print(f"group signals traced (other than 0): {signals}")
+print("\n".join(late) or "(none)")
+PY
 }
 
 # Runs "$@" in the project and appends the action, what the user saw, and the state left behind.
@@ -166,6 +209,18 @@ case "${1:-}" in
     record "$project" "$transcript" "timeout -k 2 -s $sig $after mutator$(printf ' %q' "$@")" \
       "$repo/.venv/bin/python" -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
       timeout -k 2 -s "$sig" --preserve-status "$after" "$mutator" "$@"
+    ;;
+  trace)
+    [[ $# -ge 3 ]] || usage
+    project=$2 transcript=$3
+    shift 3
+    admit trace "$project"
+    command -v strace >/dev/null || { echo "trace: strace is not installed, so the signal order can't be checked; install it (pacman -S strace, or apt install strace)"; exit 1; }
+    log=$(mktemp)
+    record "$project" "$transcript" "strace -f mutator$(printf ' %q' "$@")" \
+      strace -f -qq -e trace=kill,wait4,waitid,clone,clone3,fork,vfork -e signal=none -o "$log" "$mutator" "$@"
+    { echo "--- group signals sent after their leader was reaped (strace)"; signals_after_reap "$log"; echo; } | tee -a "$transcript"
+    rm -f "$log"
     ;;
   cleanup)
     [[ $# -eq 2 ]] || usage
