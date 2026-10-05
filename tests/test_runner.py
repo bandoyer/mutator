@@ -1,10 +1,11 @@
+import shlex
 import signal
 import sys
 import time
 
 import pytest
 
-from mutator.runner import CommandRunner, _clojure_command, _kill_group, _python_command, nearest
+from mutator.runner import CommandRunner, _clojure_command, _end_group, _kill_group, _python_command, nearest
 from mutator.runner import test_plan as plan_command
 
 
@@ -172,8 +173,32 @@ def test_only_a_group_the_command_leads_is_signalled(monkeypatch):
 
 def test_nothing_the_command_started_outlives_the_run(tmp_path):
     late = tmp_path / "late.txt"
-    command = f"(sleep 0.3; echo late > {late}) >/dev/null 2>&1 &"
+    command = f"(sleep 0.3; echo late > {shlex.quote(str(late))}) >/dev/null 2>&1 &"
     result = CommandRunner().run(command, tmp_path, 5)
     assert result.code == 0
     time.sleep(0.6)
     assert not late.exists()
+
+
+def test_the_run_waits_until_the_group_is_gone(monkeypatch):
+    signals = []
+
+    def kill_group(group):
+        signals.append(group)
+        if len(signals) == 3:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("mutator.runner._kill_group", kill_group)
+    monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
+    _end_group(4242)
+    assert signals == [4242, 4242, 4242]
+
+
+def test_the_wait_for_the_group_gives_up_at_the_deadline(monkeypatch):
+    signals = []
+    clock = iter([0.0, 1.0, 4.0, 5.0])
+    monkeypatch.setattr("mutator.runner._kill_group", signals.append)
+    monkeypatch.setattr("mutator.runner.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
+    _end_group(4242, patience=5.0)
+    assert signals == [4242, 4242]

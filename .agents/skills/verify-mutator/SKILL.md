@@ -25,7 +25,7 @@ It is ready when `$vm doctor` prints `doctor: ok`. Teardown is `$vm cleanup <pro
 $vm doctor
 ```
 
-Read-only. It fails if the launcher is missing, `./mutator --help` fails, or `../crapper` is missing. On success it prints the Python version, the checkout's commit and branch (and whether `src/`, the launcher, or `pyproject.toml` have uncommitted changes), and the core count. The default worker count is one per core, so record it with your proof.
+It runs no mutants and changes no project file. Its `./mutator --help` call creates `.venv` if it is missing, as Launch says. It fails if the launcher is missing, `./mutator --help` fails, or `../crapper` is missing. On success it prints the Python version, the checkout's commit and branch (and whether `src/`, the launcher, or `pyproject.toml` have uncommitted changes), and the core count. The default worker count is one per core, so record it with your proof.
 
 ## Drive
 
