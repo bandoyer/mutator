@@ -277,6 +277,8 @@ class CommandRunner:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 text=True,
+                # A byte the locale can't decode shows as U+FFFD instead of crashing the run.
+                errors="replace",
                 env=environment,
             )
         except OSError as exc:
