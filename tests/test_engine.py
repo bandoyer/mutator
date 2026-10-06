@@ -14,7 +14,7 @@ from conftest import wait_until
 from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
-from mutator.runner import CommandResult, CommandRunner
+from mutator.runner import CommandResult, CommandRunner, worker_temp_link
 from mutator.workers import create_workers, delete_tree, new_run_dir, worker_count
 
 
@@ -537,6 +537,36 @@ def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
     for folder in folders:
         assert folder.parent == Path(shared)
         assert not folder.exists()
+
+
+def test_a_worker_temp_folder_its_tests_removed_does_not_stop_the_cleanup(tmp_path):
+    path = tmp_path / "demo.py"
+    path.write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    class RemoveTemp:
+        verbose = False
+
+        def run(self, command, cwd, timeout):
+            if "mutation-workers" in cwd.as_posix():
+                shutil.rmtree(worker_temp_link(cwd).readlink(), ignore_errors=True)
+            return CommandResult(code=0, timed_out=False, seconds=0.01, output="")
+
+    result = mutate_file(
+        path,
+        tmp_path,
+        runner=RemoveTemp(),
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command="fake",
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+        max_workers=1,
+    )
+    assert set(result.statuses.values()) == {"survived"}
+    assert list((tmp_path / "target" / "mutation-workers").iterdir()) == []
 
 
 def test_ctrl_c_stops_the_worker_commands_and_removes_the_run_folder(tmp_path, ctrl_c_when):
