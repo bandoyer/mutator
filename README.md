@@ -29,7 +29,7 @@ The first run of a tree executes every covered mutant. Start with the file you a
 
 Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
 
-Exit `0` when every executed mutant was killed. Exit `1` on a usage error, or when a backup differs from its source. Exit `2` when the baseline tests fail, in the project or in a worker. Exit `3` when a mutant survives. A failed baseline does not rewrite the snapshot.
+Exit `0` when every executed mutant was killed. Exit `1` on a usage error, when a backup differs from its source, or when the project root is inside `target/mutation-workers`, where another run tests its mutants. Exit `2` when the baseline tests fail, in the project or in a worker. Exit `3` when a mutant survives. A failed baseline does not rewrite the snapshot.
 
 ## Workers
 

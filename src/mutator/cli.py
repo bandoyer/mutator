@@ -16,6 +16,7 @@ from mutator.coverage import covered_lines
 from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandResult, CommandRunner
+from mutator.workers import inside_workers
 
 
 def _skipped_directory_text() -> str:
@@ -126,7 +127,8 @@ When it differs, mutator stops with exit 1 and changes neither file.
 
 Exit codes:
   0  every executed mutant was killed, or there was nothing to run
-  1  usage error, or a backup that differs from its source
+  1  usage error, a backup that differs from its source, or a project root
+     inside target/mutation-workers
   2  baseline tests failed, in the project or in a worker
   3  at least one mutant survived
 
@@ -614,11 +616,18 @@ def _run(argv: list[str] | None) -> int:
     options = parse_args(argv)
     if options.action == "help":
         return _print_help(options)
+    root = options.project_root.resolve()
+    if inside_workers(root):
+        print(
+            f"mutator does not run in {root}: it is inside target/mutation-workers, "
+            "where another mutator run tests its mutants (issue #57).",
+            file=sys.stderr,
+        )
+        return 1
     missing = _require_crapper()
     if missing:
         print(missing, file=sys.stderr)
         return 2
-    root = options.project_root.resolve()
     try:
         files = select_files(options)
     except GitStatusError as exc:

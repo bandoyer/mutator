@@ -88,10 +88,32 @@ def worker_count(site_count: int, requested: int | None) -> int:
     return max(1, min(site_count, processors, limit))
 
 
+# new_run_dir writes this file into every run folder. A worker's real path keeps
+# the run folder as a parent even when target or target/mutation-workers is a
+# symlink to storage elsewhere, where neither name is left in the path.
+RUN_MARKER = ".mutator-run"
+
+
 def new_run_dir(root: Path) -> Path:
     directory = root / "target" / "mutation-workers" / f"run-{uuid.uuid4()}"
     directory.mkdir(parents=True)
+    (directory / RUN_MARKER).write_text("mutator's workers for one run (issue #57).\n", encoding="utf-8")
     return directory
+
+
+def _holds_workers(folder: Path) -> bool:
+    return (folder.name == "mutation-workers" and folder.parent.name == "target") or (folder / RUN_MARKER).is_file()
+
+
+def inside_workers(path: Path) -> bool:
+    """Whether `path` is in target/mutation-workers or in a run folder new_run_dir made.
+
+    A mutant exists only there, so a run rooted there would test the mutant's
+    own copy and could start the next such run (issue #57). The folder names
+    also catch workers that an older mutator made without the marker.
+    """
+
+    return any(_holds_workers(folder) for folder in (path, *path.parents))
 
 
 def symlink(link: Path, target: Path) -> None:
