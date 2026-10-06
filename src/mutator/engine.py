@@ -98,7 +98,8 @@ def project_files_digest(root: Path) -> str | None:
         content = b"missing"
         if os.path.lexists(path):
             try:
-                content = hashlib.sha256(path.read_bytes()).digest()
+                with open(path, "rb") as stream:
+                    content = hashlib.file_digest(stream, "sha256").digest()
             except OSError:
                 return None
         digest.update(name + b"\0" + content)

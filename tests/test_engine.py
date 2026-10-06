@@ -450,8 +450,16 @@ def test_the_project_digest_is_none_when_a_listed_path_cannot_be_read(tmp_path):
     (tmp_path / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     readable = project_files_digest(tmp_path)
     assert readable is not None
-    (tmp_path / ".metrics" / "mutate").mkdir(parents=True)
-    (tmp_path / ".metrics" / "mutate" / "demo.edn").write_text("{}", encoding="utf-8")
+    # mutator's own output is no test input.
+    for own in (".metrics/mutate/demo.edn", "target/mutation-workers/run-1/worker-0/demo.py", "target/mutator-backup/demo.py"):
+        (tmp_path / own).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / own).write_text("{}", encoding="utf-8")
+    assert project_files_digest(tmp_path) == readable
+    # A folder whose name only starts the same is.
+    (tmp_path / "target" / "mutation-workers-old").mkdir()
+    (tmp_path / "target" / "mutation-workers-old" / "x").write_text("x", encoding="utf-8")
+    assert project_files_digest(tmp_path) not in (None, readable)
+    (tmp_path / "target" / "mutation-workers-old" / "x").unlink()
     assert project_files_digest(tmp_path) == readable
     secret = tmp_path / "secret.txt"
     secret.write_text("x", encoding="utf-8")
@@ -461,3 +469,20 @@ def test_the_project_digest_is_none_when_a_listed_path_cannot_be_read(tmp_path):
     finally:
         secret.chmod(0o600)
     assert project_files_digest(tmp_path / "missing") is None
+
+
+def test_the_project_digest_of_a_subfolder_covers_only_that_folder(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("a", encoding="utf-8")
+    before = project_files_digest(app)
+    assert before is not None
+    (tmp_path / "other.txt").write_text("b", encoding="utf-8")
+    assert project_files_digest(app) == before
+    (app / ".metrics").mkdir()
+    (app / ".metrics" / "crap.edn").write_text("{}", encoding="utf-8")
+    assert project_files_digest(app) == before
+    (app / "test_demo.py").write_text("", encoding="utf-8")
+    assert project_files_digest(app) != before

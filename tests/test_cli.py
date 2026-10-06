@@ -581,3 +581,32 @@ def test_a_kill_is_kept_when_nothing_changed_and_only_the_baseline_runs(tmp_path
         assert code == 0, again.err
         assert _F_KILLED.search(again.out)
         assert log.read_text().count("run") - runs == 1
+
+
+def test_a_kill_from_a_snapshot_without_a_context_is_run_again(tmp_path, capsys):
+    # A snapshot written before contexts existed, or edited by hand.
+    root = tmp_path / "project"
+    log = _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    snapshot = root / ".metrics" / "mutate" / "demo.edn"
+    text = snapshot.read_text(encoding="utf-8")
+    assert ":context" in text
+    snapshot.write_text(re.sub(r':context "[0-9a-f]+"', ":context 7", text), encoding="utf-8")
+    runs = log.read_text().count("run")
+    code, second = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0, second.err
+    # The baseline, the worker's control run, and three mutants.
+    assert log.read_text().count("run") - runs == 5
+
+
+def test_the_same_timeout_factor_spelled_another_way_keeps_the_kill(tmp_path, capsys):
+    root = tmp_path / "project"
+    log = _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    runs = log.read_text().count("run")
+    code, second = _kept_run(root, capsys, "--timeout-factor", "1e1", "src/demo.py")
+    assert code == 0, second.err
+    assert _F_KILLED.search(second.out)
+    assert log.read_text().count("run") - runs == 1
