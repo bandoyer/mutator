@@ -1,3 +1,11 @@
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
 from mutator.coverage import covered_lines
 
 
@@ -133,12 +141,32 @@ def test_lcov_covers_every_line_of_a_python_statement_whose_first_line_is_hit(tm
     )
     assert covered_lines(tmp_path, source, "python") == {2, 3, 4, 7, 8, 9, 10, 11, 14, 19, 20, 21, 22, 23}
 
-    # tokenize stops at an unclosed string: the statements before it keep their lines.
-    source.write_text("# c\nLIMIT = max(\n    1,\n    2)\nopen = '''\n", encoding="utf-8")
-    assert covered_lines(tmp_path, source, "python") == {2, 3, 4, 7, 8, 14, 19, 20, 22}
-
-    # A source tokenize can't read keeps the report's own lines.
+    # A source this Python can't parse keeps the report's own lines, even when
+    # tokenize reads it: here it would join `idle`'s body to LIMIT (#61 review).
+    source.write_text("# c\nLIMIT = (\ndef idle(a):\n    return a + 1\n)\n", encoding="utf-8")
+    assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
     source.write_text("def place(:\n    return (1 +\n", encoding="utf-8")
     assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
     source.write_bytes(b"def place():\n    return '\xff'\n")
     assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
+
+
+def test_python_3_11_keeps_an_uncalled_body_uncovered_in_a_file_with_3_12_syntax(tmp_path):
+    # Review D1 (#61): 3.11's tokenize reads the parentheses inside these 3.12
+    # f-strings, so lines 1 to 4 became one statement, and `idle`'s body (line 3)
+    # counted as covered with line 1. The parse guard keeps the report's lines.
+    source = tmp_path / "app.py"
+    source.write_text('s = f"{ "(" }"\ndef idle(a):\n    return a + 1\nt = f"{ ")" }"\nu = f"{ ")" }"\n', encoding="utf-8")
+    probe = (
+        "from pathlib import Path; from mutator.coverage import _with_statement_lines as lines; "
+        f"print(sorted(lines(Path({str(source)!r}), {{1, 2, 4, 5}})))"
+    )
+    if sys.version_info[:2] == (3, 11):
+        command = [sys.executable, "-c", probe]
+    elif shutil.which("uv"):
+        command = ["uv", "run", "-q", "--no-project", "--python", "3.11", "python", "-c", probe]
+    else:
+        pytest.skip("needs Python 3.11, or uv to run it")
+    src = Path(__file__).resolve().parents[1] / "src"
+    done = subprocess.run(command, env={**os.environ, "PYTHONPATH": str(src)}, capture_output=True, text=True, timeout=600)
+    assert done.stdout.strip() == "[1, 2, 4, 5]", done.stderr

@@ -7,6 +7,7 @@ A file that does not appear in a report has no coverage data.
 
 from __future__ import annotations
 
+import ast
 import tokenize
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -223,14 +224,15 @@ def _statement_starts(source_path: Path) -> dict[int, int]:
     """Map each line of a Python statement to the statement's first line.
 
     A statement runs from its first token to the end of its logical line, as
-    coverage.py's `multiline_map_from_tokens` splits it. When tokenize stops
-    partway, such as at syntax newer than this Python's, the map keeps the
-    statements before that point.
+    coverage.py's `multiline_map_from_tokens` splits it. Empty when this
+    Python can't parse the source, such as syntax newer than this Python's:
+    its tokenize could then join lines coverage.py's Python kept apart.
     """
 
     starts: dict[int, int] = {}
     first = 0
     try:
+        ast.parse(source_path.read_bytes())
         with tokenize.open(source_path) as stream:
             for token in tokenize.generate_tokens(stream.readline):
                 if token.type == tokenize.NEWLINE:
@@ -238,8 +240,8 @@ def _statement_starts(source_path: Path) -> dict[int, int]:
                     first = 0
                 elif not first and token.string.strip() and token.type != tokenize.COMMENT:
                     first = token.start[0]
-    except (OSError, SyntaxError, ValueError, tokenize.TokenError):
-        pass
+    except (OSError, SyntaxError, ValueError, RecursionError, tokenize.TokenError):
+        return {}
     return starts
 
 
