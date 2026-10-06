@@ -94,6 +94,16 @@ def new_run_dir(root: Path) -> Path:
     return directory
 
 
+def inside_workers(path: Path) -> bool:
+    """Whether `path` is the target/mutation-workers folder new_run_dir uses, or inside it.
+
+    A mutant exists only there, so a run rooted there would test the mutant's
+    own copy and could start the next such run (issue #57).
+    """
+
+    return any(folder.name == "mutation-workers" and folder.parent.name == "target" for folder in (path, *path.parents))
+
+
 def symlink(link: Path, target: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink() or link.exists():

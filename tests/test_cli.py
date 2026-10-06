@@ -1,4 +1,5 @@
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -315,3 +316,69 @@ def test_a_default_run_reads_only_the_reports_this_run_wrote(tmp_path, monkeypat
     assert got == want
     for relative in files:
         assert (tmp_path / relative).is_file(), f"{relative} was deleted"
+
+
+def test_a_run_nested_in_its_own_worker_is_refused_before_it_runs_a_command(tmp_path, capsys):
+    # Issue #57: a mutant in mutator's own tests can start a run with no --root
+    # inside the worker it is tested in. That run's tests start the next one.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    marker = tmp_path / "nested-ran"
+    nested = [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all", "--max-workers", "1"]
+    nested += ["--test-command", f"touch {shlex.quote(str(marker))}", "demo.py"]
+    test = f'case "$PWD" in */target/mutation-workers/*) exec {shlex.join(nested)};; esac; exit 0'
+
+    code = run(["--root", str(project), "--no-coverage", "--mutate-all", "--max-workers", "1", "--test-command", test, "demo.py"])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Unmutated tests failed in a mutation worker for demo.py" in err
+    assert re.search(r"mutator does not run in \S+/target/mutation-workers/run-[^/]+/worker-0: it is inside", err), err
+    assert not marker.exists()
+
+
+def _worker_tree(tmp_path):
+    worker = tmp_path / "project" / "target" / "mutation-workers" / "run-1" / "worker-0"
+    (worker / "src").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(worker)
+    return worker
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["project/target/mutation-workers", "project/target/mutation-workers/run-1/worker-0", "project/target/mutation-workers/run-1/worker-0/src", "link"],
+)
+def test_a_root_in_target_mutation_workers_is_refused(tmp_path, capsys, where):
+    _worker_tree(tmp_path)
+    root = tmp_path / where
+    (root / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    marker = tmp_path / "ran"
+    refusal = f"mutator does not run in {root.resolve()}: it is inside target/mutation-workers"
+
+    code = run(["--root", str(root), "--no-coverage", "--mutate-all", "--test-command", f"touch {marker}", "demo.py"])
+    out, err = capsys.readouterr()
+    scan = run(["--scan", "--no-coverage", "--root", str(root), "demo.py"])
+    scan_out, scan_err = capsys.readouterr()
+
+    assert (code, scan) == (1, 1)
+    assert refusal in err
+    assert refusal in scan_err
+    assert out == scan_out == ""
+    assert not marker.exists()
+    assert not (root / ".metrics").exists()
+    assert not (root / "target").exists()
+    assert run(["--root", str(root), "--help"]) == 0
+
+
+@pytest.mark.parametrize("where", ["project/target/app", "project/mutation-workers/app"])
+def test_a_root_beside_target_mutation_workers_runs(tmp_path, capsys, where):
+    _worker_tree(tmp_path)
+    root = tmp_path / where
+    root.mkdir(parents=True)
+    (root / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    code = run(["--scan", "--no-coverage", "--root", str(root), "demo.py"])
+
+    assert code == 0
+    assert "demo.py:2 1 -> 0" in capsys.readouterr().out
