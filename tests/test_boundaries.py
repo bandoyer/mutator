@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import mutator.crapper_link
 from mutator.cli import (
     HELP,
     GitStatusError,
@@ -982,3 +983,19 @@ def test_snapshots_keep_other_files_empty_directories_and_odd_records(tmp_path):
     assert not (base / "empty").exists()
     assert (full / "keep.edn").is_file()
     _remove_empty_dirs(tmp_path / "missing-metrics")
+
+
+@pytest.mark.parametrize("sibling", [True, False], ids=["crapper-beside-the-checkout", "no-crapper"])
+def test_a_worker_copy_of_mutator_looks_for_crapper_beside_the_checkout(tmp_path, monkeypatch, sibling):
+    # A mutation worker copies the checkout into its own target folder (issue #8).
+    root = tmp_path.resolve()
+    if sibling:
+        (root / "crapper" / "src" / "crapper").mkdir(parents=True)
+    worker = root / "mutator" / "target" / "mutation-workers" / "run-1" / "worker-0"
+    monkeypatch.setattr(mutator.crapper_link, "__file__", str(worker / "src" / "mutator" / "crapper_link.py"))
+    # The search sees only this fixture, never a real crapper above pytest's temp folder.
+    is_dir = Path.is_dir
+    monkeypatch.setattr(Path, "is_dir", lambda path, **kwargs: path.is_relative_to(root) and is_dir(path, **kwargs))
+
+    found = root if sibling else worker.parent
+    assert mutator.crapper_link._sibling_src() == found / "crapper" / "src"

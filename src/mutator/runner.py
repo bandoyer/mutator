@@ -40,8 +40,14 @@ class CommandResult:
     output: str
 
 
+# new_run_dir writes this file into every run folder. A worker's real path keeps
+# the run folder as a parent even when target or target/mutation-workers is a
+# symlink to storage elsewhere, where neither name is left in the path.
+RUN_MARKER = ".mutator-run"
+
+
 def _worker_home(cwd: Path) -> Path | None:
-    """The overlay root when cwd is inside target/mutation-workers."""
+    """The worker folder when cwd is inside one, found by its run folder's name or marker."""
 
     for candidate in [cwd, *cwd.parents]:
         parent = candidate.parent
@@ -49,7 +55,7 @@ def _worker_home(cwd: Path) -> Path | None:
             continue
         if not parent.name.startswith("run-"):
             continue
-        if parent.parent.name == "mutation-workers":
+        if parent.parent.name == "mutation-workers" or (parent / RUN_MARKER).is_file():
             return candidate
     return None
 
@@ -78,6 +84,29 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
     if not entries:
         return
     environment["PYTHONPATH"] = os.pathsep.join(entries)
+
+
+# Git settings that name a repository outright, as a hook that runs mutator sets them.
+_GIT_LOCATIONS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _keep_git_in_worker(cwd: Path, environment: dict) -> None:
+    """A worker has no .git, so git would walk up to the project's own repository (issue #8).
+
+    The worker's run folder becomes a ceiling git doesn't search past, so a
+    test's `git add` or `git status` can't change the project's index.
+    """
+
+    worker = _worker_home(cwd)
+    if worker is None:
+        return
+    for name in _GIT_LOCATIONS:
+        environment.pop(name, None)
+    ceilings = [str(worker.parent)]
+    current = environment.get("GIT_CEILING_DIRECTORIES")
+    if current:
+        ceilings.append(current)
+    environment["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
 
 
 class Stopped(Exception):
@@ -289,6 +318,7 @@ class CommandRunner:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
+        _keep_git_in_worker(cwd, environment)
         limited = _limited(command, self.memory_limit)
         try:
             process = subprocess.Popen(

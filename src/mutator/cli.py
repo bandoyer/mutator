@@ -130,10 +130,12 @@ fail now stop the file with exit 2. --mutate-all is unchanged: it reruns every
 covered site.
 
 Selected mutants of one file run at the same time, one worker per core unless
---max-workers says otherwise. A worker is a symlink overlay under
-target/mutation-workers with its own copy of the mutated file. The project
-tree is left unchanged. Before a non-scan run, a copy an interrupted older
-run left under target/mutator-backup/ is deleted when it equals its source.
+--max-workers says otherwise. A worker is a copy of the project under
+target/mutation-workers, so tests write only to their worker's copy. Only
+node_modules, nested build and cache folders, and the project's own symlinks
+are links. Git in a worker finds no repository. Before a non-scan run, a copy
+an interrupted older run left under target/mutator-backup/ is deleted when it
+equals its source.
 When it differs, mutator stops with exit 1 and changes neither file.
 
 Exit codes:

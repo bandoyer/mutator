@@ -11,8 +11,18 @@ from pathlib import Path
 
 
 def _sibling_src() -> Path:
-    project = Path(__file__).resolve().parents[2]
-    return project.parent / "crapper" / "src"
+    """crapper's src beside the mutator checkout, or beside the nearest folder that holds it.
+
+    A mutation worker copies the checkout into the checkout's own target
+    folder, so from a worker the crapper found is the one beside the checkout
+    (issue #8).
+    """
+
+    here = Path(__file__).resolve()
+    for folder in here.parents:
+        if (folder / "crapper" / "src" / "crapper").is_dir():
+            return folder / "crapper" / "src"
+    return here.parents[3] / "crapper" / "src"
 
 
 def ensure_crapper():
