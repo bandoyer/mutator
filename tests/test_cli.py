@@ -11,6 +11,7 @@ import pytest
 from mutator.cli import parse_args, run
 from mutator.crapper_link import ensure_crapper
 from mutator.runner import CommandResult
+from mutator.workers import new_run_dir
 
 
 def test_lines_option_parses_positive_numbers():
@@ -318,23 +319,29 @@ def test_a_default_run_reads_only_the_reports_this_run_wrote(tmp_path, monkeypat
         assert (tmp_path / relative).is_file(), f"{relative} was deleted"
 
 
-def test_a_run_nested_in_its_own_worker_is_refused_before_it_runs_a_command(tmp_path, capsys):
+@pytest.mark.parametrize("link", [None, "target", "target/mutation-workers"])
+def test_a_run_nested_in_its_own_worker_is_refused_before_it_runs_a_command(tmp_path, capsys, link):
     # Issue #57: a mutant in mutator's own tests can start a run with no --root
     # inside the worker it is tested in. That run's tests start the next one.
+    # When `link` points at storage elsewhere, the worker's real path has neither name.
     project = tmp_path / "project"
     project.mkdir()
+    if link:
+        (project / link).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "storage").mkdir()
+        (project / link).symlink_to(tmp_path / "storage")
     (project / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     marker = tmp_path / "nested-ran"
     nested = [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all", "--max-workers", "1"]
     nested += ["--test-command", f"touch {shlex.quote(str(marker))}", "demo.py"]
-    test = f'case "$PWD" in */target/mutation-workers/*) exec {shlex.join(nested)};; esac; exit 0'
+    test = f'case "$PWD" in */run-*/worker-*) exec {shlex.join(nested)};; esac; exit 0'
 
     code = run(["--root", str(project), "--no-coverage", "--mutate-all", "--max-workers", "1", "--test-command", test, "demo.py"])
 
     err = capsys.readouterr().err
     assert code == 2
     assert "Unmutated tests failed in a mutation worker for demo.py" in err
-    assert re.search(r"mutator does not run in \S+/target/mutation-workers/run-[^/]+/worker-0: it is inside", err), err
+    assert re.search(r"mutator does not run in \S+/run-[^/]+/worker-0: it is inside", err), err
     assert not marker.exists()
 
 
@@ -382,3 +389,22 @@ def test_a_root_beside_target_mutation_workers_runs(tmp_path, capsys, where):
 
     assert code == 0
     assert "demo.py:2 1 -> 0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("where", "expected"), [("..", 0), (".", 1), ("worker-0/src", 1)])
+def test_in_relocated_storage_only_a_run_folder_is_refused(tmp_path, capsys, where, expected):
+    # `target` is a symlink to storage, so the run folder's real path has no target/mutation-workers.
+    project = tmp_path / "project"
+    project.mkdir()
+    (tmp_path / "storage").mkdir()
+    (project / "target").symlink_to(tmp_path / "storage")
+    root = (new_run_dir(project) / where).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    code = run(["--scan", "--no-coverage", "--root", str(root), "demo.py"])
+
+    out, err = capsys.readouterr()
+    assert code == expected
+    assert ("demo.py:2 1 -> 0" in out) == (expected == 0)
+    assert (f"mutator does not run in {root}: it is inside" in err) == (expected == 1)
