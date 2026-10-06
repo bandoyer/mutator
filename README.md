@@ -45,6 +45,8 @@ Each worker is a directory under `target/mutation-workers` that holds its own co
 
 The baseline still runs once, in the real tree, before any worker starts. Each worker then runs the unmutated tests once, without the mutant timeout, before its first mutant. A worker shares no build output with the project, so that run builds it, and mutant runs start as warm as the baseline did. If it fails or times out, the file stops with exit `2` and no mutant is counted. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the worker's copy. Before a non-scan run, a copy an interrupted older run left under `target/mutator-backup/` is deleted when it equals its source. When it differs, mutator stops with exit `1`, names both files, and changes neither.
 
+Each worker's commands get a temp folder of the worker's own as `TMPDIR`, outside the project, and it is removed with the worker. Workers' pytest sessions therefore never share a basetemp root, where each session prunes the others' folders.
+
 ## Snapshot
 
 uml-viewer loads every `*.edn` file under `.metrics/mutate`. Each file is one namespace. A Java file with an inner class, or a Go file with a function and a method, therefore writes more than one file. Two Go files in the same package share one snapshot, and rerunning one of them keeps the other's forms.

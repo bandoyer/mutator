@@ -1,9 +1,12 @@
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from conftest import wait_until
@@ -494,6 +497,46 @@ def test_verbose_names_the_mutant_timeout_and_where_it_comes_from(tmp_path, caps
     _mutate_with(tmp_path, "true", verbose=True)
 
     assert "Mutant timeout for demo.py: 2.0 s (baseline 0.0 s x 10, at least 2 s)" in capsys.readouterr().err
+
+
+def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
+    # Parallel pytest sessions that share a temp folder share one basetemp
+    # root, and each prunes the others' folders (issue #54).
+    project = tmp_path / "project"
+    project.mkdir()
+    path = project / "demo.py"
+    path.write_text("def f(a):\n    return a + 1 > 0\n", encoding="utf-8")
+    log = tmp_path / "temps.log"
+    record = f"{sys.executable} -c 'import os, tempfile; print(os.getcwd(), tempfile.gettempdir())' >> {log}"
+    mutate_file(
+        path,
+        project,
+        runner=CommandRunner(),
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command=record,
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+        max_workers=2,
+    )
+
+    shared = tempfile.gettempdir()
+    temps: dict[str, set[str]] = {}
+    for line in log.read_text(encoding="utf-8").splitlines():
+        cwd, temp = line.split()
+        temps.setdefault(cwd, set()).add(temp)
+    # The baseline runs in the project, alone, and keeps mutator's temp folder.
+    assert temps.pop(str(project.resolve())) == {shared}
+    assert len(temps) == 2
+    assert all(len(found) == 1 for found in temps.values())
+    folders = {Path(temp) for found in temps.values() for temp in found}
+    assert len(folders) == 2
+    for folder in folders:
+        assert folder.parent == Path(shared)
+        assert not folder.exists()
 
 
 def test_ctrl_c_stops_the_worker_commands_and_removes_the_run_folder(tmp_path, ctrl_c_when):

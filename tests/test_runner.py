@@ -5,6 +5,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from mutator.runner import (
     _python_command,
     _wait_until_gone,
     nearest,
+    worker_temp_link,
 )
 from mutator.runner import test_plan as plan_command
 
@@ -208,6 +210,21 @@ def test_a_worker_command_names_no_git_repository_and_keeps_existing_ceilings(tm
     outside = {"GIT_DIR": "/project/.git"}
     _keep_git_in_worker(tmp_path, outside)
     assert outside == {"GIT_DIR": "/project/.git"}
+
+
+def test_only_a_worker_with_a_linked_temp_folder_gets_it_as_tmpdir(tmp_path):
+    worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
+    (worker / "sub").mkdir(parents=True)
+    own = tmp_path / "own"
+    own.mkdir()
+    command = f"{sys.executable} -c 'import tempfile; print(tempfile.gettempdir())'"
+    inherited = tempfile.gettempdir()
+
+    assert CommandRunner().run(command, worker, 5).output.strip() == inherited
+    worker_temp_link(worker).symlink_to(own)
+    assert CommandRunner().run(command, worker, 5).output.strip() == str(own)
+    assert CommandRunner().run(command, worker / "sub", 5).output.strip() == str(own)
+    assert CommandRunner().run(command, tmp_path, 5).output.strip() == inherited
 
 
 def test_only_a_group_the_command_leads_is_signalled(monkeypatch):

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,7 +20,7 @@ from queue import Empty, Queue
 from threading import Lock
 
 from mutator.model import Site
-from mutator.runner import RUN_MARKER, Command, CommandResult
+from mutator.runner import RUN_MARKER, Command, CommandResult, worker_temp_link
 from mutator.sites import apply_site
 
 # Build output and the worker tree itself must not be shared. A link to
@@ -310,6 +311,19 @@ def _run_all(
             raise
 
 
+def _make_temps(directories: list[Path], temps: list[str]) -> None:
+    """Give each worker a temp folder of its own, and add it to `temps` (issue #54).
+
+    The folder is a short one in mutator's own temp folder. One in the worker
+    would be inside target/mutation-workers, where mutator refuses to run, and
+    a Unix socket path in it could pass the 107-byte limit.
+    """
+
+    for directory in directories:
+        temps.append(tempfile.mkdtemp(prefix="mutator-"))
+        worker_temp_link(directory).symlink_to(temps[-1])
+
+
 def run_mutants(
     root: Path,
     source: Path,
@@ -329,11 +343,13 @@ def run_mutants(
     if not sites:
         return
     base = new_run_dir(root)
+    temps: list[str] = []
     try:
         relative = source.resolve().relative_to(root.resolve()).as_posix()
         directories = create_workers(
             base, root, relative, original, worker_count(len(sites), max_workers)
         )
+        _make_temps(directories, temps)
         _run_all(
             directories,
             sites,
@@ -349,4 +365,6 @@ def run_mutants(
             file_key,
         )
     finally:
+        for temp in temps:
+            shutil.rmtree(temp, ignore_errors=True)
         delete_tree(base)

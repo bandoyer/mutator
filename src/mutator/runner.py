@@ -109,6 +109,27 @@ def _keep_git_in_worker(cwd: Path, environment: dict) -> None:
     environment["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
 
 
+def worker_temp_link(worker: Path) -> Path:
+    """The link, beside the worker in its run folder, to the worker's own temp folder."""
+
+    return worker.parent / f"tmp-{worker.name}"
+
+
+def _use_worker_temp(cwd: Path, environment: dict) -> None:
+    """Give a worker's commands the worker's own temp folder (issue #54).
+
+    Workers that shared one would share pytest's basetemp root, where each
+    session prunes the others' folders.
+    """
+
+    worker = _worker_home(cwd)
+    if worker is None:
+        return
+    link = worker_temp_link(worker)
+    if link.is_symlink():
+        environment["TMPDIR"] = str(link.readlink())
+
+
 class Stopped(Exception):
     """Mutator is stopping, so the command was stopped or never started."""
 
@@ -319,6 +340,7 @@ class CommandRunner:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
         _keep_git_in_worker(cwd, environment)
+        _use_worker_temp(cwd, environment)
         limited = _limited(command, self.memory_limit)
         try:
             process = subprocess.Popen(
