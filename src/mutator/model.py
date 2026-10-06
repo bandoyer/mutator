@@ -78,6 +78,6 @@ class RunResult:
     written: list[str]
     sites: list[Site] = field(default_factory=list)
     statuses: dict[str, str] = field(default_factory=dict)
-    baseline_failed: bool = False
-    baseline_message: str = ""
+    # Why the file stopped, such as a failed baseline: the run then exits 2. Empty when it ran.
+    stopped: str = ""
     skipped: str = ""

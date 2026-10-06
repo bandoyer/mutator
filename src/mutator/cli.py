@@ -135,7 +135,8 @@ Exit codes:
   0  every executed mutant was killed, or there was nothing to run
   1  usage error, a backup that differs from its source, or a project root
      inside target/mutation-workers
-  2  baseline tests failed, in the project or in a worker
+  2  baseline tests failed, in the project or in a worker, or a file had no
+     coverage data, so none of its sites ran
   3  at least one mutant survived
 
 Coverage, when it is produced, uses the same commands as crapper:
@@ -147,6 +148,10 @@ Coverage, when it is produced, uses the same commands as crapper:
   Python       coverage.py LCOV
 
 A site on a line the report does not mark as hit is uncovered and is not run.
+A file no report lists has no coverage data: its tool is missing or failed,
+or the reports leave it out. None of its sites runs, its snapshot is left as
+it was, and the run exits 2. Fix its coverage, leave it out of the run, or
+pass --no-coverage.
 """
 
 
@@ -541,9 +546,9 @@ def _record(result, forms: list, written: list[str]) -> str:
     if result.skipped:
         print(f"Skipping {result.path}: {result.skipped}", file=sys.stderr)
         return "skip"
-    if result.baseline_failed:
-        print(result.baseline_message, file=sys.stderr)
-        return "baseline"
+    if result.stopped:
+        print(result.stopped, file=sys.stderr)
+        return "stopped"
     print(format_site_log(result.sites, result.statuses), end="")
     forms.extend(result.forms)
     written.extend(result.written)
@@ -552,8 +557,8 @@ def _record(result, forms: list, written: list[str]) -> str:
     return "ok"
 
 
-def _finish(baseline_failed: bool, survived: bool) -> int:
-    if baseline_failed:
+def _finish(stopped: bool, survived: bool) -> int:
+    if stopped:
         return 2
     if survived:
         return 3
@@ -565,7 +570,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> i
     baselines: dict[tuple[tuple[str, ...], str], CommandResult] = {}
     forms = []
     written: list[str] = []
-    baseline_failed = False
+    stopped = False
     survived = False
     files_digest = project_files_digest(root)
     for path in files:
@@ -586,15 +591,15 @@ def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> i
             files_digest=files_digest,
         )
         outcome = _record(result, forms, written)
-        if outcome == "baseline":
-            baseline_failed = True
+        if outcome == "stopped":
+            stopped = True
         elif outcome == "survived":
             survived = True
     if forms:
         print(format_results(forms), end="")
     for path in written:
         print(f"Wrote {path}", file=sys.stderr)
-    return _finish(baseline_failed, survived)
+    return _finish(stopped, survived)
 
 
 def _terminated(signum, _frame):

@@ -35,7 +35,7 @@ Once a snapshot exists, the next run is differential. It reruns survivors. It ke
 
 So any edit to a test, a source file, a config file, or a lockfile reruns every killed mutant. Outside a git repository, nothing is kept. Even when every kill is kept, the baseline runs, so tests that fail now stop the file with exit `2`. Files git ignores, such as `.venv` or `node_modules`, and toolchain versions are not part of the check ([#56](https://github.com/bandoyer/mutator/issues/56)). `--since-last-run` is that same selection. `--mutate-all` is unchanged: it reruns every covered site, whatever the snapshot holds.
 
-Exit `0` when every executed mutant was killed. Exit `1` on a usage error, when a backup differs from its source, or when the project root is inside `target/mutation-workers`, where another run tests its mutants. Exit `2` when the baseline tests fail, in the project or in a worker. Exit `3` when a mutant survives. A failed baseline does not rewrite the snapshot.
+Exit `0` when every executed mutant was killed. Exit `1` on a usage error, when a backup differs from its source, or when the project root is inside `target/mutation-workers`, where another run tests its mutants. Exit `2` when the baseline tests fail, in the project or in a worker, or when a file has no coverage data. Exit `3` when a mutant survives. A failed baseline, or a file with no coverage data, does not rewrite the snapshot.
 
 ## Workers
 
@@ -121,7 +121,7 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | Rust | `cargo test` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
 
-Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A default run reads only the reports those commands wrote in this run, so an earlier or hand-made report on disk is ignored and left in place. `--use-existing-coverage`, `--coverage-command`, and `--scan` read every report on disk. This needs a crapper checkout with `collect_coverage` (bandoyer/crapper#28). A file missing from the report is treated as uncovered, and the run says so.
+Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A default run reads only the reports those commands wrote in this run, so an earlier or hand-made report on disk is ignored and left in place. `--use-existing-coverage`, `--coverage-command`, and `--scan` read every report on disk. This needs a crapper checkout with `collect_coverage` (bandoyer/crapper#28). A file that no report lists has no coverage data: its coverage tool is missing or failed, it has no module for the tool to run in, or the reports leave it out. mutator can't tell which of its sites the tests reach, so none of them runs, its snapshot is left as it was, and the run exits `2` after the other files run. stderr names the file. To go on, fix its coverage, leave the file out of the run (for example, `mutator src` in place of the whole tree), or pass `--no-coverage`. A file a report lists with zero hits on every line is measured: its sites are uncovered.
 
 ## Development
 

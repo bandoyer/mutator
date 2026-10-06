@@ -240,7 +240,7 @@ def _coverage_tools(root: Path, fresh: dict[str, str]):
             },
             {},
             [],
-            {"src/lib.rs": (set(), {2, 6})},
+            {"src/lib.rs": (set(), set())},
             id="rust-no-tool",
         ),
         pytest.param(
@@ -269,7 +269,7 @@ def _coverage_tools(root: Path, fresh: dict[str, str]):
             {"clock.go": _GO_CLOCK, "coverage.out": "mode: set\n{root}/clock.go:3.17,5.2 1 1\n"},
             {},
             [],
-            {"clock.go": (set(), {4, 8})},
+            {"clock.go": (set(), set())},
             id="go-no-module",
         ),
         pytest.param(
@@ -295,12 +295,14 @@ def _coverage_tools(root: Path, fresh: dict[str, str]):
             {"src/main/java/demo/Clock.java": _JAVA_CLOCK, "target/site/jacoco/jacoco.xml": _JACOCO},
             {},
             [],
-            {"src/main/java/demo/Clock.java": (set(), {5, 9})},
+            {"src/main/java/demo/Clock.java": (set(), set())},
             id="java-no-pom",
         ),
     ],
 )
 def test_a_default_run_reads_only_the_reports_this_run_wrote(tmp_path, monkeypatch, capsys, files, fresh, args, want):
+    # A file no report lists stops with no site line (#12), so the absence of a SURVIVED
+    # line is what shows its leftover report was not read.
     for relative, text in files.items():
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,6 +319,105 @@ def test_a_default_run_reads_only_the_reports_this_run_wrote(tmp_path, monkeypat
     assert got == want
     for relative in files:
         assert (tmp_path / relative).is_file(), f"{relative} was deleted"
+
+
+_ALPHA = "def work():\n    return 1 == 1\n"
+_TS_CLOCK = "export function tick(): number {\n  return 1;\n}\n"
+
+
+@pytest.mark.parametrize(
+    ("files", "fresh", "args", "ran", "stopped"),
+    [
+        pytest.param(
+            {"one/pyproject.toml": _PY_TOML, "one/src/alpha.py": _ALPHA, "two/pyproject.toml": _PY_TOML, "two/src/beta.py": _ALPHA},
+            {"one": "SF:src/alpha.py\nDA:1,1\nDA:2,1\nend_of_record\n"},
+            [],
+            {"one/src/alpha.py": {2}},
+            ["two/src/beta.py"],
+            id="py-one-of-two",
+        ),
+        pytest.param({"pyproject.toml": _PY_TOML, "src/demo.py": _PY_DEMO}, {}, [], {}, ["src/demo.py"], id="py-no-report"),
+        pytest.param({"Cargo.toml": "[package]\nname = 'clock'\n", "src/lib.rs": _RS_LIB}, {}, [], {}, ["src/lib.rs"], id="rust-no-tool"),
+        pytest.param({"clock.go": _GO_CLOCK}, {}, [], {}, ["clock.go"], id="go-no-module"),
+        pytest.param({"src/demo/core.clj": "(ns demo.core)\n\n(defn tick []\n  (= 1 1))\n"}, {}, [], {}, ["src/demo/core.clj"], id="clojure-no-deps"),
+        pytest.param(
+            {"pom.xml": "<project/>\n", "src/main/java/demo/Clock.java": _JAVA_CLOCK},
+            {},
+            [],
+            {},
+            ["src/main/java/demo/Clock.java"],
+            id="java-no-report",
+        ),
+        pytest.param(
+            {"package.json": '{"scripts": {"coverage": "exit 1"}}\n', "src/clock.ts": _TS_CLOCK},
+            {},
+            [],
+            {},
+            ["src/clock.ts"],
+            id="ts-no-report",
+        ),
+        pytest.param(
+            {"pyproject.toml": _PY_TOML, "src/demo.py": _PY_DEMO},
+            {},
+            ["--use-existing-coverage"],
+            {},
+            ["src/demo.py"],
+            id="existing-no-report",
+        ),
+        pytest.param(
+            {"src/demo.py": _PY_DEMO, "coverage/lcov.info": "SF:src/other.py\nDA:1,1\nend_of_record\n"},
+            {},
+            ["--coverage-command", "true"],
+            {},
+            ["src/demo.py"],
+            id="command-report-omits-file",
+        ),
+    ],
+)
+def test_a_file_no_coverage_report_lists_stops_with_exit_2_and_runs_none_of_its_sites(
+    tmp_path, monkeypatch, capsys, files, fresh, args, ran, stopped
+):
+    # Issue #12: coverage measured nothing for the file, so mutator can't tell which
+    # sites the tests reach. The file must not be scored as if every site were uncovered.
+    for relative, text in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    runners = ensure_crapper().runners
+    monkeypatch.setattr(runners, "run_shell", _coverage_tools(tmp_path, fresh))
+    monkeypatch.setattr(runners.shutil, "which", lambda _name: None)
+    sources = [str(tmp_path / relative) for relative in [*ran, *stopped]]
+    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+
+    code = run([*command, *args, *sources])
+
+    out, err = capsys.readouterr()
+    assert code == 2
+    sites = re.findall(r"^(?:KILLED|SURVIVED|UNCOVERED|TIMEOUT) +(\S+):(\d+) ", out, re.M)
+    assert {(relative, int(line)) for relative, line in sites} == {(r, n) for r, lines in ran.items() for n in lines}
+    snapshots = "".join(path.read_text() for path in tmp_path.glob(".metrics/mutate/**/*.edn"))
+    for relative in stopped:
+        assert f'"{relative}"' not in snapshots
+        assert f"No coverage data for {relative}: no coverage report lists it" in err
+        assert "--no-coverage" in err
+    for relative in ran:
+        assert f'"{relative}"' in snapshots
+
+
+def test_a_file_a_report_lists_with_zero_hits_is_measured(tmp_path, monkeypatch, capsys):
+    (tmp_path / "pyproject.toml").write_text(_PY_TOML, encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "demo.py").write_text(_PY_DEMO, encoding="utf-8")
+    zero = "SF:src/demo.py\nDA:1,0\nDA:2,0\nDA:5,0\nDA:6,0\nend_of_record\n"
+    monkeypatch.setattr(ensure_crapper().runners, "run_shell", _coverage_tools(tmp_path, {".": zero}))
+    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+
+    code = run([*command, str(tmp_path / "src" / "demo.py")])
+
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert re.findall(r"^UNCOVERED +src/demo.py:(\d+) ", out, re.M) == ["2", "2", "2", "6"]
+    assert "No coverage data" not in err
 
 
 @pytest.mark.parametrize("link", [None, "target", "target/mutation-workers"])

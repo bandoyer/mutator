@@ -665,6 +665,28 @@ def test_backup_and_bytecode_helpers(tmp_path):
     assert not compiled.exists()
 
 
+@pytest.mark.parametrize(("body", "stopped"), [("return x", ""), ("return 1", "so none of its 1 sites ran")])
+def test_a_file_with_no_coverage_data_stops_only_when_it_has_a_site(tmp_path, body, stopped):
+    # Issue #12: with no site there is nothing coverage would decide, so the file is not stopped.
+    path = tmp_path / "demo.py"
+    path.write_text(f"def place(x):\n    {body}\n", encoding="utf-8")
+    result = mutate_file(
+        path,
+        tmp_path,
+        runner=_Ok(),
+        covered_lines=None,
+        ignore_coverage=False,
+        mutate_all=True,
+        lines=None,
+        test_command="fake",
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+    )
+    assert (result.stopped == "") == (stopped == "")
+    assert stopped in result.stopped
+
+
 def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys, monkeypatch):
     path = tmp_path / "src" / "demo.py"
     path.parent.mkdir()
@@ -701,7 +723,7 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
     uncovered = _carry_forward([owned], {"m": False}, history, {("demo", "defn/place"): "old"}, "c")
     assert uncovered == {}
 
-    warned = mutate_file(
+    unmeasured = mutate_file(
         path,
         tmp_path,
         runner=_Ok(),
@@ -714,8 +736,9 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
         mutation_warning=50,
         baselines={},
     )
-    assert warned.forms[0].uncovered == 2
-    assert "No coverage data" in capsys.readouterr().err
+    assert (unmeasured.forms, unmeasured.written, unmeasured.sites) == ([], [], [])
+    assert "no coverage report lists it, so none of its 2 sites ran" in unmeasured.stopped
+    assert not (tmp_path / ".metrics").exists()
 
     quiet = mutate_file(
         path,
@@ -772,8 +795,8 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
         mutation_warning=50,
         baselines={},
     )
-    assert "M5" in failed.baseline_message
-    assert "START" not in failed.baseline_message
+    assert "M5" in failed.stopped
+    assert "START" not in failed.stopped
 
     scanned = scan_file(path, tmp_path, covered_lines={1}, ignore_coverage=False, lines=None)
     assert "uncovered" in scanned

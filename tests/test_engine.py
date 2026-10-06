@@ -61,7 +61,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         files_digest=project_files_digest(tmp_path),
     )
     assert path.read_bytes() == original
-    assert first.baseline_failed is False
+    assert first.stopped == ""
     form = first.forms[0]
     assert form.id == "defn/add"
     assert form.namespace == "demo"
@@ -148,8 +148,8 @@ def test_a_failed_baseline_does_not_rewrite_metrics(tmp_path):
         mutation_warning=50,
         baselines={},
     )
-    assert result.baseline_failed
-    assert result.baseline_message.startswith("Baseline failed")
+    assert result.stopped
+    assert result.stopped.startswith("Baseline failed")
     assert not snapshot_path(tmp_path, "demo").exists()
 
 
@@ -375,8 +375,8 @@ def test_tests_that_fail_unmutated_in_a_worker_stop_the_run(tmp_path):
     (tmp_path / ".venv" / "python").touch()
     result = _mutate_with(tmp_path, "test -f .venv/python")
 
-    assert result.baseline_failed
-    assert "worker" in result.baseline_message
+    assert result.stopped
+    assert "worker" in result.stopped
     assert not snapshot_path(tmp_path, "demo").exists()
 
 
@@ -384,8 +384,8 @@ def test_a_hanging_baseline_stops_at_the_baseline_timeout(tmp_path):
     started = time.monotonic()
     result = _mutate_with(tmp_path, "sleep 30", baseline_timeout=1)
 
-    assert result.baseline_failed
-    assert "Baseline timed out after 1 s for demo.py: sleep 30" in result.baseline_message
+    assert result.stopped
+    assert "Baseline timed out after 1 s for demo.py: sleep 30" in result.stopped
     assert time.monotonic() - started < 15
 
 
@@ -394,8 +394,8 @@ def test_a_hanging_control_run_stops_at_the_baseline_timeout(tmp_path):
     started = time.monotonic()
     result = _mutate_with(tmp_path, hang_in_worker, baseline_timeout=1)
 
-    assert result.baseline_failed
-    assert "Unmutated tests timed out after 1 s in a mutation worker for demo.py" in result.baseline_message
+    assert result.stopped
+    assert "Unmutated tests timed out after 1 s in a mutation worker for demo.py" in result.stopped
     assert not snapshot_path(tmp_path, "demo").exists()
     assert time.monotonic() - started < 15
 
