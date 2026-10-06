@@ -17,6 +17,7 @@ from mutator.runner import (
     Stopped,
     _Command,
     _clojure_command,
+    _keep_git_in_worker,
     _kill_group,
     _limited,
     _python_command,
@@ -175,6 +176,32 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"
+
+
+@pytest.mark.parametrize("named", [False, True], ids=["found-by-walking-up", "named-by-GIT_DIR"])
+def test_git_in_a_worker_cannot_reach_the_project_repository(tmp_path, monkeypatch, named):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    if named:
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
+    worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
+    worker.mkdir(parents=True)
+    result = CommandRunner().run("git rev-parse --git-dir", worker, 5)
+    assert result.code != 0
+    assert "not a git repository" in result.output
+
+
+def test_a_worker_command_names_no_git_repository_and_keeps_existing_ceilings(tmp_path):
+    worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
+    names = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+    environment = {name: "/project/.git" for name in names} | {"GIT_CEILING_DIRECTORIES": "/home"}
+    _keep_git_in_worker(worker / "src", environment)
+    assert environment == {"GIT_CEILING_DIRECTORIES": f"{worker.parent}{os.pathsep}/home"}
+    alone: dict = {}
+    _keep_git_in_worker(worker, alone)
+    assert alone == {"GIT_CEILING_DIRECTORIES": str(worker.parent)}
+    outside = {"GIT_DIR": "/project/.git"}
+    _keep_git_in_worker(tmp_path, outside)
+    assert outside == {"GIT_DIR": "/project/.git"}
 
 
 def test_only_a_group_the_command_leads_is_signalled(monkeypatch):

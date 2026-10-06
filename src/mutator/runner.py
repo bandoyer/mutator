@@ -80,6 +80,29 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
     environment["PYTHONPATH"] = os.pathsep.join(entries)
 
 
+# Git settings that name a repository outright, as a hook that runs mutator sets them.
+_GIT_LOCATIONS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _keep_git_in_worker(cwd: Path, environment: dict) -> None:
+    """A worker has no .git, so git would walk up to the project's own repository (issue #8).
+
+    The worker's run folder becomes a ceiling git doesn't search past, so a
+    test's `git add` or `git status` can't change the project's index.
+    """
+
+    worker = _worker_home(cwd)
+    if worker is None:
+        return
+    for name in _GIT_LOCATIONS:
+        environment.pop(name, None)
+    ceilings = [str(worker.parent)]
+    current = environment.get("GIT_CEILING_DIRECTORIES")
+    if current:
+        ceilings.append(current)
+    environment["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
+
+
 class Stopped(Exception):
     """Mutator is stopping, so the command was stopped or never started."""
 
@@ -289,6 +312,7 @@ class CommandRunner:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
+        _keep_git_in_worker(cwd, environment)
         limited = _limited(command, self.memory_limit)
         try:
             process = subprocess.Popen(

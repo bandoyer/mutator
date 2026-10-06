@@ -1,15 +1,17 @@
-"""Run mutants in symlink overlays, the way clj-mutate runs its workers.
+"""Run mutants in private copies of the project, one per worker.
 
 Each worker is a directory under target/mutation-workers. Project files are
-linked in. The file under test is a private copy, so workers can mutate it at
-the same time without touching the original tree. The overlay is removed when
-the file's mutants finish.
+copied in, so workers can mutate the file under test, and tests can write
+files, at the same time without touching the original tree or each other.
+Only node_modules, a shared dependency cache, and the project's own symlinks
+are linked. The worker is removed when the file's mutants finish.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -149,16 +151,38 @@ def _copy_configs(worker: Path, root: Path, relative: str) -> None:
         (worker / name).write_bytes(source.read_bytes())
 
 
-def _link_children(worker_dir: Path, real_dir: Path, skip: set[str]) -> None:
+# Dependencies are read, not written, so every worker shares the project's.
+SHARED = "node_modules"
+
+
+def _copy_entry(destination: Path, source: Path) -> None:
+    """Copy `source`, so a test that writes to it writes only in the worker (issue #8).
+
+    A project's own symlinks and node_modules stay links. A FIFO, socket, or
+    device is left out: reading one to copy it could block.
+    """
+
+    if source.is_symlink() or source.name == SHARED:
+        symlink(destination, source)
+    elif source.is_dir():
+        destination.mkdir()
+        for child in source.iterdir():
+            _copy_entry(destination / child.name, child)
+    elif source.is_file():
+        shutil.copy2(source, destination)
+
+
+def _copy_children(worker_dir: Path, real_dir: Path, skip: set[str]) -> None:
     if not real_dir.is_dir():
         return
+    worker_dir.mkdir(parents=True, exist_ok=True)
     for child in real_dir.iterdir():
         if child.name in skip or child.name in SKIP_LINK:
             continue
         destination = worker_dir / child.name
         if destination.exists() or destination.is_symlink():
             continue
-        symlink(destination, child)
+        _copy_entry(destination, child)
 
 
 # Node, and Vite in front of it, resolve a relative import from the real path
@@ -286,12 +310,12 @@ def _copy_importer(worker: Path, root: Path, relative: str) -> None:
 
 
 def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
-    """Real directories along the source path. Every sibling is a link."""
+    """Real directories along the source path. Every sibling is a copy."""
 
     segments = tuple(relative.split("/"))
     for index, _segment in enumerate(segments[:-1]):
         rel_dir = Path(*segments[: index + 1])
-        _link_children(worker / rel_dir, root / rel_dir, {segments[index + 1]})
+        _copy_children(worker / rel_dir, root / rel_dir, {segments[index + 1]})
     destination = worker.joinpath(*segments)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(original)
@@ -307,7 +331,7 @@ def create_workers(
         worker = base / f"worker-{index}"
         worker.mkdir(parents=True, exist_ok=True)
         _copy_configs(worker, root, relative)
-        _link_children(worker, root, {first})
+        _copy_children(worker, root, {first})
         _overlay(worker, root, relative, original)
         for importer in importers:
             _copy_importer(worker, root, importer)

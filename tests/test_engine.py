@@ -162,16 +162,20 @@ def test_worker_count_follows_sites_cores_and_the_requested_cap():
     assert worker_count(2, 8) == min(2, cores)
 
 
-def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path):
+def test_workers_copy_the_project_and_link_only_node_modules(tmp_path):
     source = tmp_path / "src" / "demo.py"
     source.parent.mkdir()
     source.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
     sibling = tmp_path / "src" / "other.py"
     sibling.write_text("kept = True\n", encoding="utf-8")
-    marker = tmp_path / "tests" / "keep.txt"
-    marker.parent.mkdir()
+    marker = tmp_path / "tests" / "data" / "keep.txt"
+    marker.parent.mkdir(parents=True)
     marker.write_text("keep", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "node_modules" / "dep").mkdir(parents=True)
+    (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    (tmp_path / "tests" / "alias").symlink_to(marker)
+    os.mkfifo(tmp_path / "tests" / "pipe")
     original = source.read_bytes()
 
     base = new_run_dir(tmp_path)
@@ -183,20 +187,28 @@ def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path):
             assert private.is_file()
             assert not private.is_symlink()
             assert private.read_bytes() == original
-            assert (worker / "src" / "other.py").is_symlink()
-            assert (worker / "tests").is_symlink()
-            assert (worker / "tests" / "keep.txt").read_text(encoding="utf-8") == "keep"
-            assert (worker / "pyproject.toml").is_file()
-            assert not (worker / "pyproject.toml").is_symlink()
-        (workers[0] / "src" / "demo.py").write_text("changed\n", encoding="utf-8")
+            for relative in ("src/other.py", "tests", "tests/data", "tests/data/keep.txt", "pyproject.toml", "web"):
+                assert not (worker / relative).is_symlink(), relative
+            assert (worker / "tests" / "data" / "keep.txt").read_text(encoding="utf-8") == "keep"
+            assert (worker / "node_modules").is_symlink()
+            assert (worker / "web" / "node_modules").is_symlink()
+            assert (worker / "tests" / "alias").is_symlink()
+            assert not (worker / "tests" / "pipe").exists()
+        for name in ("src/demo.py", "src/other.py", "tests/data/keep.txt"):
+            workers[0].joinpath(name).write_text("changed\n", encoding="utf-8")
+        workers[0].joinpath("tests/data/new.txt").write_text("new\n", encoding="utf-8")
         assert workers[1].joinpath("src/demo.py").read_bytes() == original
-        assert source.read_bytes() == original
+        assert workers[1].joinpath("src/other.py").read_text(encoding="utf-8") == "kept = True\n"
+        assert workers[1].joinpath("tests/data/keep.txt").read_text(encoding="utf-8") == "keep"
+        assert not workers[1].joinpath("tests/data/new.txt").exists()
     finally:
         delete_tree(base)
 
     assert source.read_bytes() == original
     assert sibling.read_text(encoding="utf-8") == "kept = True\n"
     assert marker.read_text(encoding="utf-8") == "keep"
+    assert not (marker.parent / "new.txt").exists()
+    assert (tmp_path / "node_modules" / "dep").is_dir()
     assert not base.exists()
 
 
@@ -224,9 +236,9 @@ def test_node_imports_the_worker_copy_through_a_relative_specifier(tmp_path):
             copied = worker / relative
             assert copied.is_file()
             assert not copied.is_symlink()
-        assert (worker / "src" / "notes.mjs").is_symlink()
+        assert not (worker / "src" / "notes.mjs").is_symlink()
         assert not (worker / "tests").is_symlink()
-        assert (worker / "tests" / "other.test.mjs").is_symlink()
+        assert not (worker / "tests" / "other.test.mjs").is_symlink()
         if shutil.which("node"):
             for script in ("src/find.test.mjs", "tests/use.mjs"):
                 completed = subprocess.run(
@@ -401,6 +413,28 @@ def test_a_hanging_control_run_stops_at_the_baseline_timeout(tmp_path):
     assert "Unmutated tests timed out after 1 s in a mutation worker for demo.py" in result.stopped
     assert not snapshot_path(tmp_path, "demo").exists()
     assert time.monotonic() - started < 15
+
+
+# Run only in a worker: the baseline runs in the real tree by design.
+WRITE_IN_WORKER = (
+    'case "$PWD" in *mutation-workers*) echo worker > note.txt; echo worker > data/fixture.txt;'
+    " git add -A > /dev/null 2>&1;; esac; true"
+)
+
+
+def test_a_test_that_writes_in_a_worker_changes_neither_the_project_nor_its_git_index(tmp_path):
+    (tmp_path / "note.txt").write_text("original\n", encoding="utf-8")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "fixture.txt").write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "note.txt", "data"], cwd=tmp_path, check=True)
+    staged = subprocess.run(["git", "ls-files"], cwd=tmp_path, check=True, capture_output=True).stdout
+
+    _mutate_with(tmp_path, WRITE_IN_WORKER)
+
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "original\n"
+    assert (tmp_path / "data" / "fixture.txt").read_text(encoding="utf-8") == "original\n"
+    assert subprocess.run(["git", "ls-files"], cwd=tmp_path, check=True, capture_output=True).stdout == staged
 
 
 def test_verbose_names_the_mutant_timeout_and_where_it_comes_from(tmp_path, capsys):
