@@ -10,7 +10,6 @@ are linked. The worker is removed when the file's mutants finish.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import sys
 import uuid
@@ -46,33 +45,6 @@ SKIP_LINK = frozenset(
         ".gradle",
     }
 )
-
-CONFIGS = (
-    "deps.edn",
-    "bb.edn",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "go.mod",
-    "go.sum",
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "tsconfig.json",
-    "Cargo.toml",
-    "Cargo.lock",
-    "pyproject.toml",
-    "pytest.ini",
-    "setup.cfg",
-    "setup.py",
-    "conftest.py",
-    "requirements.txt",
-    "Pipfile",
-    "poetry.lock",
-)
-
 
 class WorkerFailed(Exception):
     """The unmutated tests failed or timed out in a worker, so a failing mutant there proves nothing."""
@@ -141,16 +113,6 @@ def delete_tree(path: Path) -> None:
     path.unlink()
 
 
-def _copy_configs(worker: Path, root: Path, relative: str) -> None:
-    for name in CONFIGS:
-        source = root / name
-        if not source.is_file():
-            continue
-        if name == relative:
-            continue
-        (worker / name).write_bytes(source.read_bytes())
-
-
 # Dependencies are read, not written, so every worker shares the project's.
 SHARED = "node_modules"
 
@@ -172,12 +134,13 @@ def _copy_entry(destination: Path, source: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def _copy_children(worker_dir: Path, real_dir: Path, skip: set[str]) -> None:
-    if not real_dir.is_dir():
-        return
-    worker_dir.mkdir(parents=True, exist_ok=True)
+def _copy_children(worker_dir: Path, real_dir: Path) -> None:
+    # A linked node_modules on the source path would take the mutant to the original.
+    if worker_dir.is_symlink():
+        worker_dir.unlink()
+    worker_dir.mkdir(exist_ok=True)
     for child in real_dir.iterdir():
-        if child.name in skip or child.name in SKIP_LINK:
+        if child.name in SKIP_LINK:
             continue
         destination = worker_dir / child.name
         if destination.exists() or destination.is_symlink():
@@ -185,156 +148,23 @@ def _copy_children(worker_dir: Path, real_dir: Path, skip: set[str]) -> None:
         _copy_entry(destination, child)
 
 
-# Node, and Vite in front of it, resolve a relative import from the real path
-# of the module. A symlinked test therefore loads the original source.
-_SPECIFIER = re.compile(
-    r"""(?:from|import|require)\s*\(?\s*['"](\.[^'"]+)['"]""",
-)
-_EXTENSIONS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
-
-
-def _specifiers(text: str) -> list[str]:
-    found = []
-    for match in _SPECIFIER.finditer(text):
-        specifier = match.group(1).split("?", 1)[0].split("#", 1)[0]
-        if specifier.startswith("."):
-            found.append(specifier)
-    return found
-
-
-def _stem(base: Path) -> Path:
-    if base.suffix in _EXTENSIONS:
-        return Path(str(base)[: -len(base.suffix)])
-    return base
-
-
-def _candidates(directory: Path, specifier: str) -> list[Path]:
-    base = directory / specifier
-    stem = _stem(base)
-    names = [base]
-    for ext in _EXTENSIONS:
-        names.append(Path(str(stem) + ext))
-    for ext in _EXTENSIONS:
-        names.append(stem / f"index{ext}")
-    return names
-
-
-def _inside(root: Path, path: Path) -> Path | None:
-    try:
-        relative = path.resolve().relative_to(root.resolve())
-    except ValueError:
-        return None
-    return root / relative
-
-
-def _imported_files(importer: Path, root: Path) -> set[Path]:
-    try:
-        text = importer.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return set()
-    found = set()
-    for specifier in _specifiers(text):
-        for candidate in _candidates(importer.parent, specifier):
-            local = _inside(root, candidate)
-            if local is not None and local.is_file():
-                found.add(local.resolve())
-    return found
-
-
-def _keep_dir(name: str) -> bool:
-    return name not in SKIP_LINK and name != "node_modules"
-
-
-def _source_files(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if _keep_dir(name)]
-        for name in filenames:
-            if Path(name).suffix in _EXTENSIONS:
-                yield Path(dirpath) / name
-
-
-def importers_of(root: Path, relative: str) -> set[str]:
-    """Modules that reach ``relative`` through a relative import.
-
-    Those modules have to be real files in the worker. A symlink would send
-    Node back to the original tree.
-    """
-
-    target = (root / relative).resolve()
-    reverse: dict[Path, set[Path]] = {}
-    for source in _source_files(root):
-        for imported in _imported_files(source, root):
-            reverse.setdefault(imported, set()).add(source.resolve())
-    found: set[Path] = set()
-    pending = [target]
-    while pending:
-        current = pending.pop()
-        for importer in reverse.get(current, ()):
-            if importer in found or importer == target:
-                continue
-            found.add(importer)
-            pending.append(importer)
-    root_resolved = root.resolve()
-    return {path.relative_to(root_resolved).as_posix() for path in found}
-
-
-def _expand_directory(link: Path, real_dir: Path) -> None:
-    """Replace a linked directory so a copied module is not written through it."""
-
-    if not real_dir.is_dir():
-        return
-    link.unlink()
-    link.mkdir()
-    for child in real_dir.iterdir():
-        if child.name in SKIP_LINK:
-            continue
-        symlink(link / child.name, child)
-
-
-def _copy_importer(worker: Path, root: Path, relative: str) -> None:
-    real = root
-    current = worker
-    for segment in relative.split("/")[:-1]:
-        real = real / segment
-        current = current / segment
-        if current.is_symlink():
-            _expand_directory(current, real)
-        elif not current.exists():
-            current.mkdir(parents=True)
-    destination = worker / relative
-    if destination.is_symlink():
-        destination.unlink()
-    elif destination.exists():
-        return
-    destination.write_bytes((root / relative).read_bytes())
-
-
 def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
-    """Real directories along the source path. Every sibling is a copy."""
+    """Copy the project, and every folder on the source path, even one named in SKIP_LINK."""
 
-    segments = tuple(relative.split("/"))
-    for index, _segment in enumerate(segments[:-1]):
-        rel_dir = Path(*segments[: index + 1])
-        _copy_children(worker / rel_dir, root / rel_dir, {segments[index + 1]})
-    destination = worker.joinpath(*segments)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(original)
+    segments = relative.split("/")
+    for index in range(len(segments)):
+        rel_dir = Path(*segments[:index])
+        _copy_children(worker / rel_dir, root / rel_dir)
+    (worker / relative).write_bytes(original)
 
 
 def create_workers(
     base: Path, root: Path, relative: str, original: bytes, count: int
 ) -> list[Path]:
     created = []
-    first = relative.split("/", 1)[0]
-    importers = importers_of(root, relative)
     for index in range(count):
         worker = base / f"worker-{index}"
-        worker.mkdir(parents=True, exist_ok=True)
-        _copy_configs(worker, root, relative)
-        _copy_children(worker, root, {first})
         _overlay(worker, root, relative, original)
-        for importer in importers:
-            _copy_importer(worker, root, importer)
         created.append(worker)
     return created
 

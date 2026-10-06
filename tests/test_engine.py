@@ -212,6 +212,25 @@ def test_workers_copy_the_project_and_link_only_node_modules(tmp_path):
     assert not base.exists()
 
 
+@pytest.mark.parametrize("relative", ["node_modules/dep/demo.py", "build/gen/demo.py"])
+def test_a_source_under_a_linked_or_skipped_folder_gets_real_folders_in_the_worker(tmp_path, relative):
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    source.write_text("x = 1\n", encoding="utf-8")
+    (source.parent / "beside.py").write_text("y = 2\n", encoding="utf-8")
+
+    base = new_run_dir(tmp_path)
+    try:
+        worker = create_workers(base, tmp_path, relative, source.read_bytes(), 1)[0]
+        (worker / relative).write_text("mutant\n", encoding="utf-8")
+        assert not (worker / relative.split("/")[0]).is_symlink()
+        assert (worker / relative).parent.joinpath("beside.py").read_text(encoding="utf-8") == "y = 2\n"
+    finally:
+        delete_tree(base)
+
+    assert source.read_text(encoding="utf-8") == "x = 1\n"
+
+
 def test_node_imports_the_worker_copy_through_a_relative_specifier(tmp_path):
     source = tmp_path / "src" / "find.mjs"
     source.parent.mkdir()
