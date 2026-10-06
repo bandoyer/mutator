@@ -13,7 +13,7 @@ from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
-from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, scan_file
+from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandResult, CommandRunner
 from mutator.workers import inside_workers
@@ -79,8 +79,9 @@ Options:
                                 write metrics.
   --mutate-all                  Run every covered site, including ones the
                                 last snapshot already killed.
-  --since-last-run              Run survivors and sites in new or rewritten
-                                functions. This is the default when a snapshot
+  --since-last-run              Run survivors, and keep the last snapshot's
+                                kills only when nothing they depend on
+                                changed. This is the default when a snapshot
                                 exists.
   --lines <n,n,...>             Run only mutations on these source lines.
   --no-coverage                 Treat every site as covered.
@@ -115,8 +116,13 @@ Arguments:
 With no paths, source files under the project root are mutated. Directories
 named {_skipped_directory_text()} are skipped.
 
-The default, once a snapshot exists, reruns survivors and sites in functions
-whose text changed. Killed mutants in unchanged functions are kept.
+The default, once a snapshot exists, reruns survivors. It keeps a killed
+mutant only when no file git lists for the project changed, apart from
+.metrics/ and mutator's own folders under target/, and the test command, its
+directory, and --timeout-factor are the same. Any edit to a tracked or
+untracked file reruns every killed mutant. Outside a git repository nothing is
+kept. When kills are kept, the baseline still runs, so tests that fail now stop
+the file with exit 2. --mutate-all is unchanged: it reruns every covered site.
 
 Selected mutants of one file run at the same time, one worker per core unless
 --max-workers says otherwise. A worker is a symlink overlay under
@@ -561,6 +567,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> i
     written: list[str] = []
     baseline_failed = False
     survived = False
+    files_digest = project_files_digest(root)
     for path in files:
         result = mutate_file(
             path,
@@ -576,6 +583,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> i
             baselines=baselines,
             max_workers=options.max_workers,
             baseline_timeout=options.baseline_timeout,
+            files_digest=files_digest,
         )
         outcome = _record(result, forms, written)
         if outcome == "baseline":

@@ -84,11 +84,13 @@ def _remember_form(history: History, namespace: str, form: dict, data: dict, fil
     digest = form.get("hash")
     if not isinstance(form_id, str) or not isinstance(digest, str):
         return
+    context = form.get("context")
     history.forms[(namespace, form_id)] = PriorForm(
         namespace=namespace,
         id=form_id,
         digest=digest,
         file=file_key,
+        context=context if isinstance(context, str) else None,
     )
 
 
@@ -127,6 +129,7 @@ def _render_form(form: FormResult) -> dict:
         "line": form.line,
         "end-line": form.end_line,
         "hash": form.digest,
+        "context": form.context,
         "killed": form.killed,
         "survived": form.survived,
         "uncovered": form.uncovered,

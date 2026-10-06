@@ -27,7 +27,13 @@ The first run of a tree executes every covered mutant. Start with the file you a
 ./mutator --max-workers 3 src/demo/core.clj
 ```
 
-Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
+Once a snapshot exists, the next run is differential. It reruns survivors. It keeps a killed mutant from the snapshot only when nothing the kill depends on has changed:
+
+- every file git lists for the project, tracked or untracked but not ignored, apart from `.metrics/` and mutator's own `target/mutation-workers/` and `target/mutator-backup/`;
+- the test command and the directory it runs in;
+- `--timeout-factor`.
+
+So any edit to a test, a source file, a config file, or a lockfile reruns every killed mutant. Outside a git repository, nothing is kept. Even when every kill is kept, the baseline runs, so tests that fail now stop the file with exit `2`. Files git ignores, such as `.venv` or `node_modules`, and toolchain versions are not part of the check ([#56](https://github.com/bandoyer/mutator/issues/56)). `--since-last-run` is that same selection. `--mutate-all` is unchanged: it reruns every covered site, whatever the snapshot holds.
 
 Exit `0` when every executed mutant was killed. Exit `1` on a usage error, when a backup differs from its source, or when the project root is inside `target/mutation-workers`, where another run tests its mutants. Exit `2` when the baseline tests fail, in the project or in a worker. Exit `3` when a mutant survives. A failed baseline does not rewrite the snapshot.
 
@@ -54,6 +60,7 @@ uml-viewer loads every `*.edn` file under `.metrics/mutate`. Each file is one na
           :line 2
           :end-line 4
           :hash "…"
+          :context "…"
           :killed 1
           :survived 1
           :uncovered 0
@@ -72,6 +79,8 @@ uml-viewer loads every `*.edn` file under `.metrics/mutate`. Each file is one na
 | --- | --- | --- |
 | `defn/place` | `place` | no |
 | `defn-/hide` | `hide` | yes |
+
+`:context` is a digest of the test context the function's outcomes came from: the project's files, the test command and its directory, and `--timeout-factor`. A differential run keeps a kill only while `:hash` and `:context` both match. It is `nil` outside a git repository.
 
 `:sites` is every mutation in the function, including uncovered ones. The viewer prints `---no mutation sites---` when that count is zero.
 

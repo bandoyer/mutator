@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from conftest import wait_until
 
-from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file
+from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult, CommandRunner
@@ -43,6 +43,8 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
     path.parent.mkdir()
     path.write_text(SOURCE, encoding="utf-8")
     original = path.read_bytes()
+    # A kill is kept only while the files git lists are unchanged.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     runner = FakeRunner()
     first = mutate_file(
         path,
@@ -56,6 +58,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         timeout_factor=10,
         mutation_warning=50,
         baselines={},
+        files_digest=project_files_digest(tmp_path),
     )
     assert path.read_bytes() == original
     assert first.baseline_failed is False
@@ -88,6 +91,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         mutation_warning=50,
         baselines={},
         max_workers=1,
+        files_digest=project_files_digest(tmp_path),
     )
     assert second.forms[0].killed == 1
     assert second.forms[0].survived == 3
@@ -439,3 +443,90 @@ def test_ctrl_c_while_the_workers_start_still_stops_them(tmp_path, monkeypatch):
     assert time.time() - started.stat().st_mtime < 2.0
     wait_until(started, 2.5)
     assert not late.exists()
+
+
+def test_the_project_digest_is_none_when_a_listed_path_cannot_be_read(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    readable = project_files_digest(tmp_path)
+    assert readable is not None
+    # mutator's own output is no test input.
+    for own in (".metrics/mutate/demo.edn", "target/mutation-workers/run-1/worker-0/demo.py", "target/mutator-backup/demo.py"):
+        (tmp_path / own).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / own).write_text("{}", encoding="utf-8")
+    assert project_files_digest(tmp_path) == readable
+    # A folder whose name only starts the same is.
+    (tmp_path / "target" / "mutation-workers-old").mkdir()
+    (tmp_path / "target" / "mutation-workers-old" / "x").write_text("x", encoding="utf-8")
+    assert project_files_digest(tmp_path) not in (None, readable)
+    (tmp_path / "target" / "mutation-workers-old" / "x").unlink()
+    assert project_files_digest(tmp_path) == readable
+    secret = tmp_path / "secret.txt"
+    secret.write_text("x", encoding="utf-8")
+    secret.chmod(0)
+    try:
+        assert project_files_digest(tmp_path) is None
+    finally:
+        secret.chmod(0o600)
+    assert project_files_digest(tmp_path / "missing") is None
+
+
+def test_the_project_digest_of_a_subfolder_covers_only_that_folder(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("a", encoding="utf-8")
+    before = project_files_digest(app)
+    assert before is not None
+    (tmp_path / "other.txt").write_text("b", encoding="utf-8")
+    assert project_files_digest(app) == before
+    (app / ".metrics").mkdir()
+    (app / ".metrics" / "crap.edn").write_text("{}", encoding="utf-8")
+    assert project_files_digest(app) == before
+    (app / "test_demo.py").write_text("", encoding="utf-8")
+    assert project_files_digest(app) != before
+
+
+def test_a_listed_symlink_counts_by_its_target_name(tmp_path):
+    # bujo tracks .claude/skills/verify-bujo, a symlink to a folder.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "skills" / "verify").mkdir(parents=True)
+    (tmp_path / "skills" / "verify" / "SKILL.md").write_text("a", encoding="utf-8")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "verify").symlink_to("../skills/verify")
+    (tmp_path / "gone").symlink_to("nowhere")
+    linked = project_files_digest(tmp_path)
+    assert linked is not None
+    assert project_files_digest(tmp_path) == linked
+    (tmp_path / "gone").unlink()
+    (tmp_path / "gone").symlink_to("elsewhere")
+    assert project_files_digest(tmp_path) not in (None, linked)
+
+
+def test_a_listed_file_counts_by_its_execute_bit_too(tmp_path):
+    # Git records 100755 apart from 100644, and a runner can pick tests by it.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    script = tmp_path / "tests" / "check_f"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    runnable = project_files_digest(tmp_path)
+    script.chmod(0o644)
+    assert project_files_digest(tmp_path) not in (None, runnable)
+    script.chmod(0o755)
+    assert project_files_digest(tmp_path) == runnable
+
+
+def test_a_listed_path_that_is_no_regular_file_keeps_nothing_and_does_not_block(tmp_path):
+    # Opening a FIFO waits for a writer, so it must not be opened.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "data").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "data"], cwd=tmp_path, check=True)
+    (tmp_path / "data").unlink()
+    os.mkfifo(tmp_path / "data")
+    done = []
+    worker = threading.Thread(target=lambda: done.append(project_files_digest(tmp_path)), daemon=True)
+    worker.start()
+    worker.join(5)
+    assert done == [None]

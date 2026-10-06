@@ -408,3 +408,205 @@ def test_in_relocated_storage_only_a_run_folder_is_refused(tmp_path, capsys, whe
     assert code == expected
     assert ("demo.py:2 1 -> 0" in out) == (expected == 0)
     assert (f"mutator does not run in {root}: it is inside" in err) == (expected == 1)
+
+
+# A project whose one test command runs every script in tests/, unless skip.cfg
+# names it or the command names others. Each run appends a line to runs.log,
+# outside the project, so a test can count them.
+_KEPT_DEMO = "def f():\n    return 1\n\n\ndef h(x):\n    return x + 1\n"
+_KEPT_CHECK = """import os, pathlib, sys
+sys.path.insert(0, "src")
+with open({log!r}, "a") as log:
+    log.write("run\\n")
+if os.environ.get("BREAK_CHECKS"):
+    raise SystemExit(1)
+skip = pathlib.Path("skip.cfg").read_text().split()
+for path in sorted(pathlib.Path("tests").glob("*.py")):
+    if path.stem not in skip and (len(sys.argv) < 2 or path.stem in sys.argv[1:]):
+        exec(compile(path.read_text(), str(path), "exec"), {{}})
+"""
+_ASSERT_F = "from demo import f\nassert f() == 1\n"
+_CALL_F = "from demo import f\nf()\n"
+
+
+def _git(root, *args):
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@localhost", *args],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _kept_project(root, files, use_git=True):
+    log = root.parent / f"{root.name}-runs.log"
+    texts = {
+        "src/demo.py": _KEPT_DEMO,
+        "check.py": _KEPT_CHECK.format(log=str(log)),
+        "skip.cfg": "",
+        "tests/f.py": _ASSERT_F,
+        "tests/h.py": "from demo import h\nassert h(1) == 2\n",
+        **files,
+    }
+    for relative, text in texts.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    if use_git:
+        _git(root, "init", "-q")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "fixture")
+    return log
+
+
+def _kept_run(root, capsys, *args, command=None):
+    command = command or f"{sys.executable} check.py"
+    code = run(["--root", str(root), "--no-coverage", "--max-workers", "1", "--test-command", command, *args])
+    return code, capsys.readouterr()
+
+
+def _write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+_F_KILLED = re.compile(r"^KILLED +src/demo\.py:2 1 -> 0$", re.M)
+_F_SURVIVED = re.compile(r"^SURVIVED +src/demo\.py:2 1 -> 0$", re.M)
+
+
+@pytest.mark.parametrize(
+    "files, change, args, use_git",
+    [
+        pytest.param(
+            {},
+            lambda root: (_write(root / "tests/f.py", _CALL_F), _git(root, "commit", "-qam", "weaken")),
+            [],
+            True,
+            id="assertion-deleted",
+        ),
+        pytest.param({}, lambda root: (root / "tests/f.py").unlink(), [], True, id="test-file-deleted"),
+        pytest.param(
+            {"tests/f.py": "import demo\nassert demo.f() == 1\n"},
+            lambda root: _write(root / "tests/a.py", "import demo\ndemo.f = lambda: 1\n"),
+            [],
+            True,
+            id="untracked-file-added",
+        ),
+        pytest.param({}, lambda root: _write(root / "skip.cfg", "f\n"), [], True, id="config-changed"),
+        pytest.param({}, lambda root: None, ["--test-command", f"{sys.executable} check.py h"], True, id="command-changed"),
+        pytest.param({}, lambda root: None, ["--timeout-factor", "20"], True, id="timeout-factor-changed"),
+        pytest.param(
+            {
+                "src/app.py": "from demo import f\n\n\ndef g():\n    return f()\n",
+                "tests/f.py": "from app import g\nassert g() == 1\n",
+            },
+            lambda root: _write(root / "src/app.py", "from demo import f\n\n\ndef g():\n    return 1\n"),
+            [],
+            True,
+            id="other-source-changed",
+        ),
+        pytest.param(
+            {
+                "src/demo.py": _KEPT_DEMO + "\n\ndef check():\n    assert f() == 1\n",
+                "tests/f.py": "import demo\ndemo.check()\n",
+            },
+            lambda root: _write(root / "src/demo.py", _KEPT_DEMO + "\n\ndef check():\n    f()\n"),
+            [],
+            True,
+            id="same-file-test-changed",
+        ),
+        pytest.param({}, lambda root: _write(root / "tests/f.py", _CALL_F), [], False, id="no-git"),
+    ],
+)
+def test_a_kept_kill_is_run_again_when_its_test_context_changed(tmp_path, capsys, files, change, args, use_git):
+    root = tmp_path / "project"
+    log = _kept_project(root, files, use_git)
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0, first.err
+    assert _F_KILLED.search(first.out)
+    change(root)
+    runs = log.read_text().count("run")
+    code, second = _kept_run(root, capsys, *args, "src/demo.py")
+    if "--timeout-factor" in args:
+        # The same tests kill the mutant again, so it must be run, not kept:
+        # the baseline, the worker's control run, and three mutants.
+        assert code == 0, second.err
+        assert _F_KILLED.search(second.out)
+        assert log.read_text().count("run") - runs == 5
+        return
+    assert code == 3, second.err
+    assert _F_SURVIVED.search(second.out)
+
+
+def test_mutate_all_with_lines_drops_a_kill_on_another_line_when_the_tests_changed(tmp_path, capsys):
+    root = tmp_path / "project"
+    _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "--mutate-all", "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    _write(root / "tests/f.py", _CALL_F)
+    code, second = _kept_run(root, capsys, "--mutate-all", "--lines", "6", "src/demo.py")
+    assert code == 0, second.err
+    assert "src/demo.py:2" not in second.out
+    assert re.search(r"^KILLED +src/demo\.py:6 ", second.out, re.M)
+
+
+@pytest.mark.parametrize("breaks", ["command", "environment"])
+def test_when_every_site_is_kept_tests_that_fail_now_stop_the_run(tmp_path, capsys, monkeypatch, breaks):
+    root = tmp_path / "project"
+    _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    snapshot = root / ".metrics" / "mutate" / "demo.edn"
+    before = (snapshot.read_bytes(), snapshot.stat().st_mtime_ns)
+    command = None
+    if breaks == "command":
+        command = "false"
+    else:
+        monkeypatch.setenv("BREAK_CHECKS", "1")
+    code, second = _kept_run(root, capsys, "src/demo.py", command=command)
+    assert code == 2
+    assert "Baseline failed for src/demo.py" in second.err
+    assert "KILLED" not in second.out
+    assert "Wrote" not in second.err
+    assert (snapshot.read_bytes(), snapshot.stat().st_mtime_ns) == before
+
+
+def test_a_kill_is_kept_when_nothing_changed_and_only_the_baseline_runs(tmp_path, capsys):
+    root = tmp_path / "project"
+    log = _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    for _ in range(2):
+        runs = log.read_text().count("run")
+        code, again = _kept_run(root, capsys, "src/demo.py")
+        assert code == 0, again.err
+        assert _F_KILLED.search(again.out)
+        assert log.read_text().count("run") - runs == 1
+
+
+def test_a_kill_from_a_snapshot_without_a_context_is_run_again(tmp_path, capsys):
+    # A snapshot written before contexts existed, or edited by hand.
+    root = tmp_path / "project"
+    log = _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    snapshot = root / ".metrics" / "mutate" / "demo.edn"
+    text = snapshot.read_text(encoding="utf-8")
+    assert ":context" in text
+    snapshot.write_text(re.sub(r':context "[0-9a-f]+"', ":context 7", text), encoding="utf-8")
+    runs = log.read_text().count("run")
+    code, second = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0, second.err
+    # The baseline, the worker's control run, and three mutants.
+    assert log.read_text().count("run") - runs == 5
+
+
+def test_the_same_timeout_factor_spelled_another_way_keeps_the_kill(tmp_path, capsys):
+    root = tmp_path / "project"
+    log = _kept_project(root, {})
+    code, first = _kept_run(root, capsys, "src/demo.py")
+    assert code == 0 and _F_KILLED.search(first.out)
+    runs = log.read_text().count("run")
+    code, second = _kept_run(root, capsys, "--timeout-factor", "1e1", "src/demo.py")
+    assert code == 0, second.err
+    assert _F_KILLED.search(second.out)
+    assert log.read_text().count("run") - runs == 1
