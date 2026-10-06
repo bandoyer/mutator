@@ -352,6 +352,19 @@ def test_ctrl_c_stops_the_command_it_interrupts(tmp_path, ctrl_c_when):
     assert not late.exists()
 
 
+def test_the_ctrl_c_tests_hold_when_the_run_starts_with_sigint_ignored(tmp_path):
+    # A shell starts a background job with SIGINT ignored, and Python keeps it
+    # ignored, so a Ctrl-C test's SIGINT would do nothing (issue #86).
+    child = (
+        "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+        "os.execv(sys.executable, [sys.executable, '-m', 'pytest', *sys.argv[1:]])"
+    )
+    test = f"{__file__}::test_ctrl_c_stops_the_command_it_interrupts"
+    inner = [sys.executable, "-c", child, "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "inner"), test]
+    done = subprocess.run(inner, cwd=Path(__file__).parents[1], capture_output=True, text=True, timeout=60)
+    assert "1 passed" in done.stdout, done.stdout[-2000:]
+
+
 def test_ctrl_c_stops_what_a_finished_command_left_holding_its_output(tmp_path, ctrl_c_when):
     # Issue #44: the shell exits at once; its background child keeps the output
     # pipe open. The leader stays unreaped, so its group can still be stopped.

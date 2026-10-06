@@ -7,7 +7,14 @@ import pytest
 
 @pytest.fixture
 def ctrl_c_when():
-    """Press Ctrl-C once a file exists: SIGINT to this process's main thread only."""
+    """Press Ctrl-C once a file exists: SIGINT to this process's main thread only.
+
+    Python keeps SIGINT ignored when it starts with SIGINT ignored, as a shell
+    starts a background job (issue #86). So the test gets Python's own Ctrl-C
+    handler while it runs, and the one it started with afterwards.
+    """
+
+    before = signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def arm(marker):
         main = threading.main_thread().ident
@@ -22,7 +29,8 @@ def ctrl_c_when():
 
         threading.Thread(target=watch, daemon=True).start()
 
-    return arm
+    yield arm
+    signal.signal(signal.SIGINT, before)
 
 
 def wait_until(marker, seconds):
