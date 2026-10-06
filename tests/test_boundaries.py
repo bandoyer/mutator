@@ -673,6 +673,17 @@ def test_backup_and_bytecode_helpers(tmp_path):
     assert not compiled.exists()
 
 
+
+def test_a_pyc_already_gone_when_mutator_drops_it_is_not_an_error(tmp_path, monkeypatch):
+    # Issue #82: a process the tests left behind can remove the .pyc between its listing and its removal.
+    path = tmp_path / "src" / "demo.py"
+    cache = path.parent / "__pycache__"
+    cache.mkdir(parents=True)
+    gone = cache / "demo.cpython-314.pyc"
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: iter([gone]))
+    _drop_bytecode(path)
+    assert not gone.exists()
+
 @pytest.mark.parametrize(("body", "stopped"), [("return x", ""), ("return 1", "so none of its 1 sites ran")])
 def test_a_file_with_no_coverage_data_stops_only_when_it_has_a_site(tmp_path, body, stopped):
     # Issue #12: with no site there is nothing coverage would decide, so the file is not stopped.
