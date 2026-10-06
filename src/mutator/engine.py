@@ -247,14 +247,21 @@ def _coverage_map(
     return {site.mutation_id: _covered(site, covered_lines, ignore_coverage) for site in found}
 
 
-def _warn_uncovered(file_key: str, found, covered_lines, ignore_coverage: bool) -> None:
+def _unmeasured(file_key: str, found, covered_lines, ignore_coverage: bool) -> RunResult | None:
+    """Stop a file that has sites and no coverage data: coverage didn't measure it.
+
+    Its tool may be missing or have failed, or the reports leave it out. Scoring
+    it as uncovered would drop its sites from the score unseen (#12).
+    """
+
     if covered_lines is not None or ignore_coverage or not found:
-        return
-    print(
-        f"No coverage data for {file_key}; its sites are uncovered. "
-        "Pass --no-coverage to run them anyway.",
-        file=sys.stderr,
+        return None
+    message = (
+        f"No coverage data for {file_key}: no coverage report lists it, so none of its "
+        f"{len(found)} sites ran. To go on, fix its coverage, leave it out of the run, "
+        "or pass --no-coverage to run every site."
     )
+    return RunResult(path=file_key, forms=[], written=[], stopped=message)
 
 
 def _warn_many(file_key: str, selected, mutation_warning: int) -> None:
@@ -294,7 +301,7 @@ def _baseline_failure(
     message = f"{failed} for {file_key}: {display_command(command)}"
     if tail:
         message = f"{message}\n{tail}"
-    return RunResult(path=file_key, forms=[], written=[], baseline_failed=True, baseline_message=message)
+    return RunResult(path=file_key, forms=[], written=[], stopped=message)
 
 
 def _apply_selected(
@@ -394,8 +401,10 @@ def mutate_file(
         return RunResult(path=file_key, forms=[], written=[], skipped="file is not UTF-8")
     original, source = decoded
     found = sites_in_file(source, path, root, file_key)
+    unmeasured = _unmeasured(file_key, found, covered_lines, ignore_coverage)
+    if unmeasured is not None:
+        return unmeasured
     covered = _coverage_map(found, covered_lines, ignore_coverage)
-    _warn_uncovered(file_key, found, covered_lines, ignore_coverage)
     history = load_history(root, file_key)
     digests = form_digests(source, path, root)
     command, cwd = test_plan(root, path, language, test_command)
