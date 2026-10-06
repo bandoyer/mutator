@@ -550,6 +550,7 @@ def _mutate_in_worker(tmp_path, work):
 
     class InWorker:
         verbose = False
+        memory_limit = 0
 
         def run(self, command, cwd, timeout):
             if "mutation-workers" in cwd.as_posix():
