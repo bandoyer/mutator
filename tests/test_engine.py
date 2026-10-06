@@ -534,9 +534,11 @@ def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
     assert all(len(found) == 1 for found in temps.values())
     folders = {Path(temp) for found in temps.values() for temp in found}
     assert len(folders) == 2
+    # One private folder for the run, in mutator's temp folder, holds them.
+    assert len({folder.parent for folder in folders}) == 1
     for folder in folders:
-        assert folder.parent == Path(shared)
-        assert not folder.exists()
+        assert folder.parent.parent == Path(shared)
+        assert not folder.parent.exists()
 
 
 def test_a_worker_temp_folder_its_tests_removed_does_not_stop_the_cleanup(tmp_path):
@@ -567,6 +569,77 @@ def test_a_worker_temp_folder_its_tests_removed_does_not_stop_the_cleanup(tmp_pa
     )
     assert set(result.statuses.values()) == {"survived"}
     assert list((tmp_path / "target" / "mutation-workers").iterdir()) == []
+
+
+def _mutate_in_worker(tmp_path, work):
+    """Run demo.py's mutants with a fake runner that calls `work(temp)` in each worker's temp folder."""
+
+    path = tmp_path / "demo.py"
+    path.write_text("def f():\n    return 1\n", encoding="utf-8")
+    temps = []
+
+    class InWorker:
+        verbose = False
+
+        def run(self, command, cwd, timeout):
+            if "mutation-workers" in cwd.as_posix():
+                temp = worker_temp_link(cwd).readlink()
+                temps.append(temp)
+                work(temp)
+            return CommandResult(code=0, timed_out=False, seconds=0.01, output="")
+
+    mutate_file(
+        path,
+        tmp_path,
+        runner=InWorker(),
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command="fake",
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+        max_workers=1,
+    )
+    return temps
+
+
+def test_folders_a_test_locked_in_its_temp_folder_are_removed_but_not_through_a_link(tmp_path, capsys):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    outside.chmod(0o500)
+
+    def lock(temp):
+        for name, mode in (("unreadable", 0o000), ("read-only", 0o500)):
+            folder = temp / name
+            if not folder.exists():
+                folder.mkdir()
+                (folder / "file.txt").write_text("x", encoding="utf-8")
+                folder.chmod(mode)
+        if not (temp / "outside").is_symlink():
+            (temp / "outside").symlink_to(outside)
+
+    try:
+        temps = _mutate_in_worker(tmp_path, lock)
+        assert temps
+        assert not temps[0].exists()
+        assert not temps[0].parent.exists()
+        assert outside.stat().st_mode & 0o777 == 0o500
+        assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+        assert "could not remove" not in capsys.readouterr().err
+    finally:
+        outside.chmod(0o700)
+
+
+def test_a_temp_folder_that_cannot_be_removed_is_named(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("mutator.workers.shutil.rmtree", lambda path, ignore_errors: None)
+    temps = _mutate_in_worker(tmp_path, lambda temp: None)
+    monkeypatch.undo()
+
+    assert f"mutator could not remove its temp folder {temps[0].parent}" in capsys.readouterr().err
+    shutil.rmtree(temps[0].parent)
 
 
 def test_ctrl_c_stops_the_worker_commands_and_removes_the_run_folder(tmp_path, ctrl_c_when):

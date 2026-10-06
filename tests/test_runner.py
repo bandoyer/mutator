@@ -225,6 +225,10 @@ def test_only_a_worker_with_a_linked_temp_folder_gets_it_as_tmpdir(tmp_path):
     assert CommandRunner().run(command, worker, 5).output.strip() == str(own)
     assert CommandRunner().run(command, worker / "sub", 5).output.strip() == str(own)
     assert CommandRunner().run(command, tmp_path, 5).output.strip() == inherited
+    # A test removed it: the next command gets it again, not a shared one.
+    own.rmdir()
+    assert CommandRunner().run(command, worker, 5).output.strip() == str(own)
+    assert own.is_dir()
 
 
 def test_only_a_group_the_command_leads_is_signalled(monkeypatch):

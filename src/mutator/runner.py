@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import math
 import os
@@ -126,8 +127,14 @@ def _use_worker_temp(cwd: Path, environment: dict) -> None:
     if worker is None:
         return
     link = worker_temp_link(worker)
-    if link.is_symlink():
-        environment["TMPDIR"] = str(link.readlink())
+    if not link.is_symlink():
+        return
+    own = link.readlink()
+    # A test can remove its own temp folder. Made again in the run's private
+    # folder, it keeps the worker's next commands off a shared one.
+    with contextlib.suppress(OSError):
+        own.mkdir(exist_ok=True)
+    environment["TMPDIR"] = str(own)
 
 
 class Stopped(Exception):

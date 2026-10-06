@@ -9,6 +9,7 @@ are linked. The worker is removed when the file's mutants finish.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
@@ -312,16 +313,37 @@ def _run_all(
 
 
 def _make_temps(directories: list[Path], temps: list[str]) -> None:
-    """Give each worker a temp folder of its own, and add it to `temps` (issue #54).
+    """Give each worker a temp folder of its own (issue #54), in one private folder it adds to `temps`.
 
-    The folder is a short one in mutator's own temp folder. One in the worker
+    The folders are short ones in mutator's own temp folder. One in the worker
     would be inside target/mutation-workers, where mutator refuses to run, and
     a Unix socket path in it could pass the 107-byte limit.
     """
 
+    temps.append(tempfile.mkdtemp(prefix="mutator-"))
     for directory in directories:
-        temps.append(tempfile.mkdtemp(prefix="mutator-"))
-        worker_temp_link(directory).symlink_to(temps[-1])
+        own = Path(temps[-1]) / directory.name
+        own.mkdir()
+        worker_temp_link(directory).symlink_to(own)
+
+
+def _remove_temp(folder: str) -> None:
+    """Remove a run's temp folder, also folders its tests left unreadable or read-only.
+
+    Folders are opened up first, never through a symlink, whose target can be a
+    project folder. What still can't be removed is named on stderr.
+    """
+
+    with contextlib.suppress(OSError):
+        os.chmod(folder, 0o700)
+        for parent, names, _files in os.walk(folder):
+            for name in names:
+                path = os.path.join(parent, name)
+                if not os.path.islink(path):
+                    os.chmod(path, 0o700)
+    shutil.rmtree(folder, ignore_errors=True)
+    if os.path.lexists(folder):
+        print(f"mutator could not remove its temp folder {folder}", file=sys.stderr)
 
 
 def run_mutants(
@@ -366,5 +388,5 @@ def run_mutants(
         )
     finally:
         for temp in temps:
-            shutil.rmtree(temp, ignore_errors=True)
+            _remove_temp(temp)
         delete_tree(base)
