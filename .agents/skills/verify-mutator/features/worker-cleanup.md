@@ -52,19 +52,20 @@ Preconditions:
   - During the timeout's grace: the shell exits on SIGTERM, and its background sleep ignores SIGTERM. `$vm signal "$project" "$T" INT 1.6 --no-coverage --mutate-all --max-workers 1 --baseline-timeout 1 --test-command "case \"\$PWD\" in *mutation-workers*) exit 0;; esac; trap 'exit 0' TERM; (trap '' TERM; exec sleep 30) & wait" demo.py`.
 
   Pass for both: exit code `130`, worker folders `(none)`, and processes left `(none)`. The bug shows as `sleep 30` in processes left.
-- **cleanup-nested-timeout.** The outer test command, in its worker, runs a second mutator in `inner/`. The worker reaches `inner/` through a link, so the inner run's root is the project's own `inner/`, outside `target/mutation-workers`, and `nested-run-refused` doesn't apply. The inner control run keeps writing files in the inner worker, so the outer control run hangs until `--baseline-timeout 3` stops it:
+- **cleanup-nested-timeout.** The outer test command, in its worker, runs a second mutator on `inner`, a project of its own beside the fixture in the scratch folder. Its root is outside `target/mutation-workers`, so `nested-run-refused` doesn't apply. A folder inside the fixture would not do: each worker copies the project (#8), so that folder's copy is inside the worker, and the inner run is refused (#85). The inner control run keeps writing files in the inner worker, so the outer control run hangs until `--baseline-timeout 3` stops it:
 
   ```bash
   project=$($vm project fixture)
   scripts=$(dirname "$project")
-  mkdir "$project/inner" && cp "$project/demo.py" "$project/inner/"
+  mkdir "$scripts/inner" && cp "$project/demo.py" "$scripts/inner/"
   printf 'case "$PWD" in */inner/target/mutation-workers/*) end=$(( $(date +%%s) + 30 )); i=0; while [ "$(date +%%s)" -lt "$end" ]; do : > "w$i"; i=$((i+1)); done;; esac\nexit 0\n' >"$scripts/inner.sh"
-  printf 'case "$PWD" in */target/mutation-workers/*) cd inner && exec %s --no-coverage --mutate-all --max-workers 1 --test-command "sh %s/inner.sh" demo.py;; esac\nexit 0\n' "$PWD/mutator" "$scripts" >"$scripts/outer.sh"
+  printf 'case "$PWD" in */target/mutation-workers/*) cd %s && exec %s --no-coverage --mutate-all --max-workers 1 --test-command "sh %s/inner.sh" demo.py;; esac\nexit 0\n' "$scripts/inner" "$PWD/mutator" "$scripts" >"$scripts/outer.sh"
   $vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 1 --baseline-timeout 3 --test-command "sh $scripts/outer.sh" demo.py
-  ls -A "$project/inner/target/mutation-workers"
+  ls -A "$scripts/inner/target/mutation-workers"
+  for p in /proc/[0-9]*; do readlink "$p/cwd"; done 2>/dev/null | grep -F "$scripts/inner"
   ```
 
-  Run it from the repo root, so `$PWD/mutator` is this checkout's launcher. Pass: exit code `2`, stderr says `Unmutated tests timed out after 3 s in a mutation worker for demo.py`, no traceback, worker folders `(none)`, processes left `(none)`, and the last `ls` prints nothing: the inner run removed its own `run-<id>` folder. The bug shows as a `run-<id>` folder in `inner/target/mutation-workers`, and `sh .../inner.sh` left running.
+  Run it from the repo root, so `$PWD/mutator` is this checkout's launcher. Pass: exit code `2`, stderr says `Unmutated tests timed out after 3 s in a mutation worker for demo.py` and has no `mutator does not run in`, no traceback, worker folders `(none)`, processes left `(none)`, and the last two commands print nothing: the inner run removed its own `run-<id>` folder, and nothing runs in `inner`. The helper lists processes only under the project, so the last command checks `inner`. The bug shows as a `run-<id>` folder in `inner/target/mutation-workers`, and `sh .../inner.sh` left running. A refused inner run shows as `Unmutated tests failed` with `mutator does not run in`, and proves nothing about the timeout.
 - **nested-run-refused.** The outer test command, in its worker, runs a second mutator there with no `--root`, so its root is the worker. That inner run's test command only touches a file, so the recipe stays small even where the refusal is missing:
 
   ```bash
