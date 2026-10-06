@@ -133,7 +133,7 @@ def _use_worker_temp(cwd: Path, environment: dict) -> None:
     # A test can remove its own temp folder. Made again in the run's private
     # folder, it keeps the worker's next commands off a shared one.
     with contextlib.suppress(OSError):
-        own.mkdir(exist_ok=True)
+        own.mkdir()
     environment["TMPDIR"] = str(own)
 
 

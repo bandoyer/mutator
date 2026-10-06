@@ -541,36 +541,6 @@ def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
         assert not folder.parent.exists()
 
 
-def test_a_worker_temp_folder_its_tests_removed_does_not_stop_the_cleanup(tmp_path):
-    path = tmp_path / "demo.py"
-    path.write_text("def f():\n    return 1\n", encoding="utf-8")
-
-    class RemoveTemp:
-        verbose = False
-
-        def run(self, command, cwd, timeout):
-            if "mutation-workers" in cwd.as_posix():
-                shutil.rmtree(worker_temp_link(cwd).readlink(), ignore_errors=True)
-            return CommandResult(code=0, timed_out=False, seconds=0.01, output="")
-
-    result = mutate_file(
-        path,
-        tmp_path,
-        runner=RemoveTemp(),
-        covered_lines=None,
-        ignore_coverage=True,
-        mutate_all=True,
-        lines=None,
-        test_command="fake",
-        timeout_factor=10,
-        mutation_warning=50,
-        baselines={},
-        max_workers=1,
-    )
-    assert set(result.statuses.values()) == {"survived"}
-    assert list((tmp_path / "target" / "mutation-workers").iterdir()) == []
-
-
 def _mutate_in_worker(tmp_path, work):
     """Run demo.py's mutants with a fake runner that calls `work(temp)` in each worker's temp folder."""
 
@@ -603,6 +573,20 @@ def _mutate_in_worker(tmp_path, work):
         max_workers=1,
     )
     return temps
+
+
+def test_temp_folders_the_tests_removed_do_not_stop_the_cleanup(tmp_path, capsys):
+    def remove(temp):
+        # The worker's own folder, then the run's folder that holds it.
+        shutil.rmtree(temp, ignore_errors=True)
+        shutil.rmtree(temp.parent, ignore_errors=True)
+
+    temps = _mutate_in_worker(tmp_path, remove)
+
+    assert len(temps) == 2
+    assert not temps[0].parent.exists()
+    assert list((tmp_path / "target" / "mutation-workers").iterdir()) == []
+    assert "could not remove" not in capsys.readouterr().err
 
 
 def test_folders_a_test_locked_in_its_temp_folder_are_removed_but_not_through_a_link(tmp_path, capsys):

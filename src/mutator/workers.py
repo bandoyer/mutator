@@ -320,9 +320,10 @@ def _make_temps(directories: list[Path], temps: list[str]) -> None:
     a Unix socket path in it could pass the 107-byte limit.
     """
 
-    temps.append(tempfile.mkdtemp(prefix="mutator-"))
+    run_temp = Path(tempfile.mkdtemp(prefix="mutator-"))
+    temps.append(str(run_temp))
     for directory in directories:
-        own = Path(temps[-1]) / directory.name
+        own = run_temp / directory.name
         own.mkdir()
         worker_temp_link(directory).symlink_to(own)
 
