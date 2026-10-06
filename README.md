@@ -123,6 +123,8 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A default run reads only the reports those commands wrote in this run, so an earlier or hand-made report on disk is ignored and left in place. `--use-existing-coverage`, `--coverage-command`, and `--scan` read every report on disk. This needs a crapper checkout with `collect_coverage` (bandoyer/crapper#28). A file that no report lists has no coverage data: its coverage tool is missing or failed, it has no module for the tool to run in, or the reports leave it out. mutator can't tell which of its sites the tests reach, so none of them runs, its snapshot is left as it was, and the run exits `2` after the other files run. stderr names the file. To go on, fix its coverage, leave the file out of the run (for example, `mutator src` in place of the whole tree), or pass `--no-coverage`. A file a report lists with zero hits on every line is measured: its sites are uncovered.
 
+In Python, coverage.py reports a multi-line statement at its first line only. So a site on any line of a statement counts as covered when the statement's first line is hit. This needs the Python that runs mutator to parse the file. If it can't, such as for syntax newer than that Python, only the report's own lines count.
+
 ## Development
 
 ```bash

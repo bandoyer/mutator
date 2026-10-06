@@ -725,3 +725,83 @@ def test_a_mutant_is_killed_when_it_passes_the_memory_limit_and_survives_with_no
     args = ["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", "--lines", "2"]
     run([*args, "--memory-limit", limit, "--test-command", command, "demo.py"])
     assert re.search(rf"^{status} +demo.py:2 0 -> 1$", capsys.readouterr().out, re.MULTILINE)
+
+
+# Issue #61: coverage.py's LCOV report lists a multi-line statement at its first
+# line only. _WRAPPED_LCOV is the report coverage.py 7.16.2 wrote for _WRAPPED
+# when a test called every function but `untested`, and `multi_if` with a = -1.
+_WRAPPED = """import functools
+
+
+def call_args(a, b):
+    return max(
+        a + b,
+        a - b,
+    )
+
+
+def any_match(items):
+    return any(
+        (item == 1 and item > 0) or item < 0
+        for item in items
+    )
+
+
+def multi_if(a, b):
+    if (a > 0 and
+            b > 0):
+        return max(a,
+                   b - 1)
+    return 0
+
+
+def decorated():
+    @functools.lru_cache(
+        maxsize=1 + 1,
+    )
+    def inner(x):
+        return x
+    return inner(3)
+
+
+def untested(a, b):
+    return max(
+        a + b,
+        a - b,
+    )
+
+
+def excluded(a):
+    if a > 0:
+        return a
+    raise ValueError(a - 1)  # pragma: no cover
+"""
+_WRAPPED_HITS = {1: 1, 4: 1, 5: 1, 11: 1, 12: 1, 18: 1, 19: 1, 21: 0, 23: 1, 26: 1, 27: 1, 30: 1, 31: 1, 32: 1}
+_WRAPPED_HITS |= {35: 1, 36: 0, 42: 1, 43: 1, 44: 1}
+_WRAPPED_LCOV = "SF:src/demo.py\n" + "".join(f"DA:{n},{hits}\n" for n, hits in _WRAPPED_HITS.items()) + "end_of_record\n"
+
+
+def test_a_site_on_a_later_line_of_a_covered_python_statement_runs(tmp_path, capsys):
+    # Covered: a call's arguments (6, 7), `return any(...)` (13), an `if` test's
+    # second line (20), a decorator's argument (28). Not covered: a `return` inside
+    # that `if` (22), an untested function (37, 38), a `# pragma: no cover` line (45).
+    source = tmp_path / "src" / "demo.py"
+    source.parent.mkdir()
+    source.write_text(_WRAPPED, encoding="utf-8")
+    report = tmp_path / "target" / "coverage" / "python" / "lcov.info"
+    report.parent.mkdir(parents=True)
+    report.write_text(_WRAPPED_LCOV, encoding="utf-8")
+    want = {"run": {6, 7, 13, 19, 20, 23, 28, 43}, "uncovered": {22, 37, 38, 45}}
+    mutate = ["--use-existing-coverage", "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+
+    assert run(["--root", str(tmp_path), *mutate, str(source)]) == 3
+    got = {"run": set(), "uncovered": set()}
+    for status, line in re.findall(r"^(SURVIVED|UNCOVERED) +src/demo.py:(\d+) ", capsys.readouterr().out, re.M):
+        got["uncovered" if status == "UNCOVERED" else "run"].add(int(line))
+    assert got == want
+
+    assert run(["--root", str(tmp_path), "--scan", str(source)]) == 0
+    got = {"run": set(), "uncovered": set()}
+    for line, mark in re.findall(r"^. src/demo.py:(\d+) .*?( uncovered)?  \[", capsys.readouterr().out, re.M):
+        got["uncovered" if mark else "run"].add(int(line))
+    assert got == want

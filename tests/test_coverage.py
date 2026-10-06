@@ -1,3 +1,11 @@
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
 from mutator.coverage import covered_lines
 
 
@@ -96,3 +104,69 @@ def test_go_profile_does_not_cross_files(tmp_path):
     profile.write_text("mode: set\na/b/widget.go:2.1,2.2 1 1\n", encoding="utf-8")
     assert covered_lines(tmp_path, short, "go") is None
     assert covered_lines(tmp_path, long, "go") == {2}
+
+
+def test_lcov_covers_every_line_of_a_python_statement_whose_first_line_is_hit(tmp_path):
+    # coverage.py lists a multi-line statement at its first line only (#61).
+    report = tmp_path / "target" / "coverage" / "python" / "lcov.info"
+    report.parent.mkdir(parents=True)
+    hits = {2: 1, 7: 1, 8: 1, 14: 1, 15: 0, 19: 1, 20: 1, 22: 1}
+    report.write_text("SF:app.py\n" + "".join(f"DA:{n},{h}\n" for n, h in hits.items()) + "end_of_record\n", encoding="utf-8")
+    source = tmp_path / "app.py"
+    source.write_text(
+        "# place and check run, idle doesn't\n"
+        "LIMIT = max(\n"
+        "    1,\n"
+        "    2)\n"
+        "\n"
+        "\n"
+        "def place(a, b):\n"
+        "    return max(  # the larger\n"
+        "        a + b,\n"
+        "        a - b,\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def idle(a):\n"
+        "    return (a *\n"
+        "            2)\n"
+        "\n"
+        "\n"
+        "def check(a, b):\n"
+        "    if (a and\n"
+        "            b): return a == b\n"
+        "    return a - \\\n"
+        "        b\n",
+        encoding="utf-8",
+    )
+    assert covered_lines(tmp_path, source, "python") == {2, 3, 4, 7, 8, 9, 10, 11, 14, 19, 20, 21, 22, 23}
+
+    # A source this Python can't parse keeps the report's own lines, even when
+    # tokenize reads it: here it would join `idle`'s body to LIMIT (#61 review).
+    source.write_text("# c\nLIMIT = (\ndef idle(a):\n    return a + 1\n)\n", encoding="utf-8")
+    assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
+    source.write_text("def place(:\n    return (1 +\n", encoding="utf-8")
+    assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
+    source.write_bytes(b"def place():\n    return '\xff'\n")
+    assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
+
+
+def test_python_3_11_keeps_an_uncalled_body_uncovered_in_a_file_with_3_12_syntax(tmp_path):
+    # Review D1 (#61): 3.11's tokenize reads the parentheses inside these 3.12
+    # f-strings, so lines 1 to 4 became one statement, and `idle`'s body (line 3)
+    # counted as covered with line 1. The parse guard keeps the report's lines.
+    source = tmp_path / "app.py"
+    source.write_text('s = f"{ "(" }"\ndef idle(a):\n    return a + 1\nt = f"{ ")" }"\nu = f"{ ")" }"\n', encoding="utf-8")
+    probe = (
+        "from pathlib import Path; from mutator.coverage import _with_statement_lines as lines; "
+        f"print(sorted(lines(Path({str(source)!r}), {{1, 2, 4, 5}})))"
+    )
+    if sys.version_info[:2] == (3, 11):
+        command = [sys.executable, "-c", probe]
+    elif shutil.which("uv"):
+        command = ["uv", "run", "-q", "--no-project", "--python", "3.11", "python", "-c", probe]
+    else:
+        pytest.skip("needs Python 3.11, or uv to run it")
+    src = Path(__file__).resolve().parents[1] / "src"
+    done = subprocess.run(command, env={**os.environ, "PYTHONPATH": str(src)}, capture_output=True, text=True, timeout=600)
+    assert done.stdout.strip() == "[1, 2, 4, 5]", done.stderr
