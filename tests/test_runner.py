@@ -198,6 +198,16 @@ def test_git_in_a_worker_cannot_reach_the_project_repository(tmp_path, monkeypat
     assert "not a git repository" in result.output
 
 
+def test_a_worker_command_gets_no_pycache_prefix(tmp_path, monkeypatch):
+    # Review of #82: with a prefix, a mutant's .pyc would sit in a mirror folder mutator doesn't clean.
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "prefix"))
+    worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
+    worker.mkdir(parents=True)
+    command = f"{shlex.quote(sys.executable)} -c 'import sys; print(sys.pycache_prefix)'"
+    assert CommandRunner().run(command, worker, 10).output.strip() == "None"
+    assert CommandRunner().run(command, tmp_path, 10).output.strip() == str(tmp_path / "prefix")
+
+
 def test_a_worker_command_names_no_git_repository_and_keeps_existing_ceilings(tmp_path):
     worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
     names = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")

@@ -190,11 +190,17 @@ def _drop_bytecode(path: Path) -> None:
     (issue #82).
     """
 
-    cache = path.parent / "__pycache__"
-    if not cache.is_dir():
+    own = path.stem + "."
+    try:
+        entries = os.scandir(path.parent / "__pycache__")
+    except OSError:
         return
-    for item in cache.glob(path.stem + ".*.pyc"):
-        item.unlink(missing_ok=True)
+    # A literal match: a name such as demo[1] is no glob pattern. The listing
+    # streams, so a large __pycache__ is never held in memory at once.
+    with entries:
+        for entry in entries:
+            if entry.name.startswith(own) and entry.name.endswith(".pyc"):
+                Path(entry.path).unlink(missing_ok=True)
 
 
 def mapped_cwd(worker: Path, root: Path, cwd: Path) -> Path:
