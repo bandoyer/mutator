@@ -7,6 +7,7 @@ A file that does not appear in a report has no coverage data.
 
 from __future__ import annotations
 
+import tokenize
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -218,6 +219,42 @@ def _go_lines(profile, source_path: str) -> set[int] | None:
     return covered
 
 
+def _statement_starts(source_path: Path) -> dict[int, int]:
+    """Map each line of a Python statement to the statement's first line.
+
+    A statement runs from its first token to the end of its logical line, as
+    coverage.py's `multiline_map_from_tokens` splits it. Empty when tokenize
+    can't read the source.
+    """
+
+    starts: dict[int, int] = {}
+    first = 0
+    try:
+        with tokenize.open(source_path) as stream:
+            for token in tokenize.generate_tokens(stream.readline):
+                if token.type == tokenize.NEWLINE:
+                    starts.update(dict.fromkeys(range(first, token.end[0] + 1), first))
+                    first = 0
+                elif not first and token.string.strip() and token.type != tokenize.COMMENT:
+                    first = token.start[0]
+    except (OSError, SyntaxError, ValueError, tokenize.TokenError):
+        return {}
+    return starts
+
+
+def _with_statement_lines(source_path: Path, hit: set[int] | None) -> set[int] | None:
+    """Add every line of each Python statement whose first line is hit.
+
+    coverage.py's LCOV report lists a multi-line statement at its first line
+    only, so a site on a later line would otherwise never count as covered (#61).
+    """
+
+    if hit is None:
+        return None
+    starts = _statement_starts(source_path)
+    return hit | {line for line, first in starts.items() if first in hit}
+
+
 def covered_lines(root: Path, source_path: Path, language: str, reports=None) -> set[int] | None:
     """Lines with a hit, or None when this file is absent from coverage.
 
@@ -235,4 +272,7 @@ def covered_lines(root: Path, source_path: Path, language: str, reports=None) ->
         html = _covered_from_pairs(_lookup(bundle.form_html, path))
         if html is not None:
             return html
-    return _covered_from_pairs(_lookup(bundle.lcov, path))
+    lines = _covered_from_pairs(_lookup(bundle.lcov, path))
+    if language == "python":
+        return _with_statement_lines(source_path, lines)
+    return lines

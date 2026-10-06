@@ -96,3 +96,45 @@ def test_go_profile_does_not_cross_files(tmp_path):
     profile.write_text("mode: set\na/b/widget.go:2.1,2.2 1 1\n", encoding="utf-8")
     assert covered_lines(tmp_path, short, "go") is None
     assert covered_lines(tmp_path, long, "go") == {2}
+
+
+def test_lcov_covers_every_line_of_a_python_statement_whose_first_line_is_hit(tmp_path):
+    # coverage.py lists a multi-line statement at its first line only (#61).
+    report = tmp_path / "target" / "coverage" / "python" / "lcov.info"
+    report.parent.mkdir(parents=True)
+    hits = {2: 1, 7: 1, 8: 1, 14: 1, 15: 0, 19: 1, 20: 1, 22: 1}
+    report.write_text("SF:app.py\n" + "".join(f"DA:{n},{h}\n" for n, h in hits.items()) + "end_of_record\n", encoding="utf-8")
+    source = tmp_path / "app.py"
+    source.write_text(
+        "# place and check run, idle doesn't\n"
+        "LIMIT = max(\n"
+        "    1,\n"
+        "    2)\n"
+        "\n"
+        "\n"
+        "def place(a, b):\n"
+        "    return max(  # the larger\n"
+        "        a + b,\n"
+        "        a - b,\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def idle(a):\n"
+        "    return (a *\n"
+        "            2)\n"
+        "\n"
+        "\n"
+        "def check(a, b):\n"
+        "    if (a and\n"
+        "            b): return a == b\n"
+        "    return a - \\\n"
+        "        b\n",
+        encoding="utf-8",
+    )
+    assert covered_lines(tmp_path, source, "python") == {2, 3, 4, 7, 8, 9, 10, 11, 14, 19, 20, 21, 22, 23}
+
+    # A source tokenize can't read keeps the report's own lines.
+    source.write_text("def place(:\n    return (1 +\n", encoding="utf-8")
+    assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
+    source.write_bytes(b"def place():\n    return '\xff'\n")
+    assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
