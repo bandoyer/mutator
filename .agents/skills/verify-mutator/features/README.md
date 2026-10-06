@@ -12,7 +12,7 @@ This folder is the maintained source for verifying what a mutator user sees. Rea
 
 - Run every mutator command through `$vm drive <project> <transcript> <args...>`, and every project command through `$vm exec`.
 - Treat every command as literal. Keep quoted text unchanged.
-- Once `.metrics/mutate` exists, a rerun skips mutants it already killed. Pass `--mutate-all` or use a fresh project when a recipe needs every mutant to run.
+- Once `.metrics/mutate` exists, a rerun with nothing changed keeps the mutants it already killed and doesn't run them. Pass `--mutate-all` or use a fresh project when a recipe needs every mutant to run.
 
 ## Proof and skip reporting
 
@@ -30,4 +30,5 @@ This folder is the maintained source for verifying what a mutator user sees. Rea
 - [Number options](./number-options.md) covers rejecting `0`, `inf`, `nan`, and text that isn't a number for every number option before any test runs, a huge finite timeout that runs to the end, and the placeholders `--help` shows.
 - [Source safety](./source-safety.md) covers an edit saved to the source while mutants run, and a backup left under `target/mutator-backup/` by an older run: deleted when it equals its source, and a stop with exit code `1` when it differs.
 - [Coverage reports](./coverage-reports.md) covers which coverage reports a default run reads: only the ones its own coverage tools wrote in this run, while `--use-existing-coverage` still reads every report on disk.
+- [Cached kills](./cached-kills.md) covers the kills a rerun keeps from the snapshot: kept only while no file git lists and no test option changed, rerun as survivors after a test is weakened, and an exit 2 when every site is cached and the tests now fail.
 - [Install with the lowest dependencies](./install-minimum.md) covers mutator with every direct dependency at the lowest version `pyproject.toml` allows: it parses a function in each tree-sitter language.
