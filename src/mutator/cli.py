@@ -15,7 +15,7 @@ from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
 from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest, scan_file
 from mutator.report import format_results, format_site_log
-from mutator.runner import CommandResult, CommandRunner
+from mutator.runner import MEMORY_LIMIT, CommandResult, CommandRunner
 from mutator.workers import inside_workers
 
 
@@ -105,6 +105,10 @@ Options:
                                 once. Default: one per core. The run uses the
                                 smaller of this limit, the cores, and the
                                 number of selected sites.
+  --memory-limit <MiB>          Limit each test process's data memory
+                                (RLIMIT_DATA) to this many MiB, so a mutant
+                                that allocates without bound fails and is
+                                killed. 0 means no limit. Default: {MEMORY_LIMIT}.
   --verbose                     Print each test command, how it ended, and
                                 each mutant.
 
@@ -119,10 +123,11 @@ named {_skipped_directory_text()} are skipped.
 The default, once a snapshot exists, reruns survivors. It keeps a killed
 mutant only when no file git lists for the project changed, apart from
 .metrics/ and mutator's own folders under target/, and the test command, its
-directory, and --timeout-factor are the same. Any edit to a tracked or
-untracked file reruns every killed mutant. Outside a git repository nothing is
-kept. When kills are kept, the baseline still runs, so tests that fail now stop
-the file with exit 2. --mutate-all is unchanged: it reruns every covered site.
+directory, --timeout-factor, and --memory-limit are the same. Any edit to a
+tracked or untracked file reruns every killed mutant. Outside a git repository
+nothing is kept. When kills are kept, the baseline still runs, so tests that
+fail now stop the file with exit 2. --mutate-all is unchanged: it reruns every
+covered site.
 
 Selected mutants of one file run at the same time, one worker per core unless
 --max-workers says otherwise. A worker is a symlink overlay under
@@ -175,6 +180,7 @@ class Options:
     baseline_timeout: float = BASELINE_TIMEOUT
     mutation_warning: int = 50
     max_workers: int | None = None
+    memory_limit: int = MEMORY_LIMIT
     changed: bool = False
     verbose: bool = False
 
@@ -256,6 +262,10 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 continue
             if arg == "--max-workers":
                 options.max_workers = _integer(_take(args, index, arg), arg, 1, "a positive integer")
+                index += 2
+                continue
+            if arg == "--memory-limit":
+                options.memory_limit = _integer(_take(args, index, arg), arg, 0, "a whole number of MiB, 0 or more")
                 index += 2
                 continue
             if arg == "--lines":
@@ -566,7 +576,7 @@ def _finish(stopped: bool, survived: bool) -> int:
 
 
 def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> int:
-    runner = CommandRunner(verbose=options.verbose)
+    runner = CommandRunner(verbose=options.verbose, memory_limit=options.memory_limit)
     baselines: dict[tuple[tuple[str, ...], str], CommandResult] = {}
     forms = []
     written: list[str] = []

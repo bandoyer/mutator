@@ -27,6 +27,9 @@ LONGEST_TIMEOUT = 2_000_000.0
 # How long a command has to end after SIGTERM before it gets SIGKILL. A mutator
 # run nested in a test command uses it to stop its own commands and clean up.
 GRACE = 1.0
+# Each test process's data memory, in MiB, unless --memory-limit says otherwise.
+# A mutant that allocates without bound then fails within seconds, not at its timeout.
+MEMORY_LIMIT = 2048
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,23 @@ def _wait_until_gone(group: int, patience: float) -> None:
         time.sleep(0.01)
 
 
+def _limited(command: Command, megabytes: int) -> Command:
+    """The command, with each process's data memory (RLIMIT_DATA) limited to `megabytes` MiB. 0 is no limit.
+
+    A shell sets the limit and then execs the command, so the limit is set in
+    the child, and every process the command starts inherits it. It sets the
+    hard limit too, so no process can raise it again. A hard limit that is
+    already lower stays, and the command still runs. ulimit -d takes KiB, and
+    rlim_t holds bytes only below 2**64, so a larger limit is none.
+    """
+
+    if not megabytes:
+        return command
+    argv = ["/bin/sh", "-c", command] if isinstance(command, str) else command
+    kib = str(megabytes * 1024) if megabytes < 2**44 else "unlimited"
+    return ["/bin/sh", "-c", 'ulimit -d "$1" 2>/dev/null; shift; exec "$@"', "sh", kib, *argv]
+
+
 def display_command(command: Command) -> str:
     """A shell-looking rendering. A list is quoted so it can be pasted."""
 
@@ -225,8 +245,9 @@ def display_command(command: Command) -> str:
 
 
 class CommandRunner:
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, memory_limit: int = 0):
         self.verbose = verbose
+        self.memory_limit = memory_limit
         self._stopping = threading.Event()
 
     def stop(self) -> None:
@@ -268,11 +289,12 @@ class CommandRunner:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
+        limited = _limited(command, self.memory_limit)
         try:
             process = subprocess.Popen(
-                command,
+                limited,
                 cwd=cwd,
-                shell=isinstance(command, str),
+                shell=isinstance(limited, str),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,

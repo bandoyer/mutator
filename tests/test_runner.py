@@ -18,6 +18,7 @@ from mutator.runner import (
     _Command,
     _clojure_command,
     _kill_group,
+    _limited,
     _python_command,
     _wait_until_gone,
     nearest,
@@ -594,3 +595,44 @@ def test_after_the_output_ends_the_exit_is_polled_with_a_doubling_delay(monkeypa
         command.end()
 
     assert sleeps == [0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.05, 0.05]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [[sys.executable, "-c", "bytes(128 << 20)"], f"{sys.executable} -c 'bytes(128 << 20)'"],
+    ids=["argv", "shell"],
+)
+def test_each_process_of_a_command_gets_the_memory_limit(tmp_path, command):
+    # Issue #58: a mutant could allocate without bound until its timeout.
+    limited = CommandRunner(memory_limit=64).run(command, tmp_path, 30)
+    assert (limited.code, "MemoryError" in limited.output) == (1, True)
+    assert CommandRunner(memory_limit=0).run(command, tmp_path, 30).code == 0
+
+
+def test_the_memory_limit_is_set_in_kib_and_0_sets_none(tmp_path):
+    def soft_limit(runner):
+        return runner.run("ulimit -S -d", tmp_path, 5).output
+
+    # The hard limit too, so no process the command starts can raise it again.
+    assert CommandRunner(memory_limit=2048).run("ulimit -S -d; ulimit -H -d", tmp_path, 5).output == "2097152\n" * 2
+    assert soft_limit(CommandRunner(memory_limit=1)) == "1024\n"
+    assert soft_limit(CommandRunner(memory_limit=0)) == soft_limit(CommandRunner())
+    assert _limited("true", 0) == "true"
+    # ulimit -d takes KiB, and rlim_t holds bytes only below 2**64.
+    assert str((2**44 - 1) * 1024) in _limited(["true"], 2**44 - 1)
+    assert "unlimited" in _limited(["true"], 2**44)
+
+
+def test_a_lower_hard_memory_limit_stays_and_the_command_still_runs(tmp_path):
+    code = (
+        "from pathlib import Path; from mutator.runner import CommandRunner; "
+        "print(CommandRunner(memory_limit=2048).run('ulimit -S -d; echo ran', Path('.'), 5).output, end='')"
+    )
+    lowered = subprocess.run(
+        ["/bin/sh", "-c", 'ulimit -d 65536 && exec "$0" -c "$1"', sys.executable, code],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert lowered.stdout == "65536\nran\n"
