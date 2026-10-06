@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import math
 import os
@@ -107,6 +108,33 @@ def _keep_git_in_worker(cwd: Path, environment: dict) -> None:
     if current:
         ceilings.append(current)
     environment["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
+
+
+def worker_temp_link(worker: Path) -> Path:
+    """The link, beside the worker in its run folder, to the worker's own temp folder."""
+
+    return worker.parent / f"tmp-{worker.name}"
+
+
+def _use_worker_temp(cwd: Path, environment: dict) -> None:
+    """Give a worker's commands the worker's own temp folder (issue #54).
+
+    Workers that shared one would share pytest's basetemp root, where each
+    session prunes the others' folders.
+    """
+
+    worker = _worker_home(cwd)
+    if worker is None:
+        return
+    link = worker_temp_link(worker)
+    if not link.is_symlink():
+        return
+    own = link.readlink()
+    # A test can remove its own temp folder. Made again in the run's private
+    # folder, it keeps the worker's next commands off a shared one.
+    with contextlib.suppress(OSError):
+        own.mkdir()
+    environment["TMPDIR"] = str(own)
 
 
 class Stopped(Exception):
@@ -319,6 +347,7 @@ class CommandRunner:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
         _keep_git_in_worker(cwd, environment)
+        _use_worker_temp(cwd, environment)
         limited = _limited(command, self.memory_limit)
         try:
             process = subprocess.Popen(

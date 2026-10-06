@@ -9,9 +9,11 @@ are linked. The worker is removed when the file's mutants finish.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,7 +21,7 @@ from queue import Empty, Queue
 from threading import Lock
 
 from mutator.model import Site
-from mutator.runner import RUN_MARKER, Command, CommandResult
+from mutator.runner import RUN_MARKER, Command, CommandResult, worker_temp_link
 from mutator.sites import apply_site
 
 # Build output and the worker tree itself must not be shared. A link to
@@ -310,6 +312,45 @@ def _run_all(
             raise
 
 
+def _make_temps(directories: list[Path], temps: list[str]) -> None:
+    """Give each worker a temp folder of its own (issue #54), in one private folder it adds to `temps`.
+
+    The folders are short ones in mutator's own temp folder. One in the worker
+    would be inside target/mutation-workers, where mutator refuses to run, and
+    a Unix socket path in it could pass the 107-byte limit.
+    """
+
+    run_temp = Path(tempfile.mkdtemp(prefix="mutator-"))
+    temps.append(str(run_temp))
+    for directory in directories:
+        own = run_temp / directory.name
+        own.mkdir()
+        worker_temp_link(directory).symlink_to(own)
+
+
+def _remove_temp(folder: str) -> None:
+    """Remove a run's temp folder, also folders its tests left unreadable or read-only.
+
+    Folders are opened up first, never through a symlink, whose target can be a
+    project folder. A test can even replace the run's folder with one: then
+    only the link goes. What still can't be removed is named on stderr.
+    """
+
+    if os.path.islink(folder):
+        os.unlink(folder)
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(folder, 0o700)
+        for parent, names, _files in os.walk(folder):
+            for name in names:
+                path = os.path.join(parent, name)
+                if not os.path.islink(path):
+                    os.chmod(path, 0o700)
+    shutil.rmtree(folder, ignore_errors=True)
+    if os.path.lexists(folder):
+        print(f"mutator could not remove its temp folder {folder}", file=sys.stderr)
+
+
 def run_mutants(
     root: Path,
     source: Path,
@@ -329,11 +370,13 @@ def run_mutants(
     if not sites:
         return
     base = new_run_dir(root)
+    temps: list[str] = []
     try:
         relative = source.resolve().relative_to(root.resolve()).as_posix()
         directories = create_workers(
             base, root, relative, original, worker_count(len(sites), max_workers)
         )
+        _make_temps(directories, temps)
         _run_all(
             directories,
             sites,
@@ -349,4 +392,6 @@ def run_mutants(
             file_key,
         )
     finally:
+        for temp in temps:
+            _remove_temp(temp)
         delete_tree(base)
