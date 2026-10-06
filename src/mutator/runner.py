@@ -223,16 +223,17 @@ def _limited(command: Command, megabytes: int) -> Command:
     """The command, with each process's data memory (RLIMIT_DATA) limited to `megabytes` MiB. 0 is no limit.
 
     A shell sets the limit and then execs the command, so the limit is set in
-    the child, and every process the command starts inherits it. A hard limit
-    that is already lower stays, and the command still runs. ulimit -d takes
-    KiB, and rlim_t holds bytes only below 2**64, so a larger limit is none.
+    the child, and every process the command starts inherits it. It sets the
+    hard limit too, so no process can raise it again. A hard limit that is
+    already lower stays, and the command still runs. ulimit -d takes KiB, and
+    rlim_t holds bytes only below 2**64, so a larger limit is none.
     """
 
     if not megabytes:
         return command
     argv = ["/bin/sh", "-c", command] if isinstance(command, str) else command
     kib = str(megabytes * 1024) if megabytes < 2**44 else "unlimited"
-    return ["/bin/sh", "-c", 'ulimit -S -d "$1" 2>/dev/null; shift; exec "$@"', "sh", kib, *argv]
+    return ["/bin/sh", "-c", 'ulimit -d "$1" 2>/dev/null; shift; exec "$@"', "sh", kib, *argv]
 
 
 def display_command(command: Command) -> str:

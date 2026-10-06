@@ -126,12 +126,14 @@ def _listed_identity(path: Path) -> bytes:
     return content + (b"x" if mode & stat.S_IXUSR else b"-")
 
 
-def _test_context(files_digest: str | None, command: Command, cwd: Path, timeout_factor: float) -> str | None:
+def _test_context(
+    files_digest: str | None, command: Command, cwd: Path, timeout_factor: float, memory_limit: int
+) -> str | None:
     """What a kill depends on besides its own function. None when it can't be known."""
 
     if files_digest is None:
         return None
-    identity = repr((files_digest, _command_key(command), str(cwd), timeout_factor))
+    identity = repr((files_digest, _command_key(command), str(cwd), timeout_factor, memory_limit))
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
@@ -408,7 +410,7 @@ def mutate_file(
     history = load_history(root, file_key)
     digests = form_digests(source, path, root)
     command, cwd = test_plan(root, path, language, test_command)
-    context = _test_context(files_digest, command, cwd, timeout_factor)
+    context = _test_context(files_digest, command, cwd, timeout_factor, runner.memory_limit)
     selected = _select(found, covered, history, digests, mutate_all, lines, context)
     outcomes = _carry_forward(found, covered, history, digests, context)
     _warn_many(file_key, selected, mutation_warning)

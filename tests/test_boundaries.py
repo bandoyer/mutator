@@ -121,6 +121,7 @@ class _Fn:
 class _Ok:
     def __init__(self, seconds=0.01):
         self.verbose = False
+        self.memory_limit = 0
         self.seconds = seconds
         self.timeouts = []
         self._lock = threading.Lock()
@@ -783,6 +784,7 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
 
     class Red:
         verbose = False
+        memory_limit = 0
 
         def run(self, command, cwd, timeout):
             lines = ["START"] + [f"M{i}" for i in range(1, 24)] + ["END"]
@@ -818,6 +820,7 @@ def test_mutate_all_reruns_a_killed_mutant_and_clears_its_backup(tmp_path):
     class Exec:
         def __init__(self):
             self.verbose = False
+            self.memory_limit = 0
             self.calls = 0
             self._lock = threading.Lock()
 
@@ -871,6 +874,7 @@ def test_a_missing_backup_is_not_unlinked_again(tmp_path):
 
     class Drop:
         verbose = False
+        memory_limit = 0
 
         def run(self, command, cwd, timeout):
             if timeout != BASELINE_TIMEOUT:

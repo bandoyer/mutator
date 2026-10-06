@@ -5,7 +5,7 @@ Each test command mutator runs, for the baseline, a worker's control run, or a m
 ## Sub-features
 
 - `memory-runaway`: a mutant whose tests allocate without bound is `KILLED` at the limit, long before its timeout.
-- `memory-default`: with no option, a test process can't take more than 2048 MiB.
+- `memory-default`: with no option, a test process can't allocate more than 2048 MiB of private memory, such as Python objects or `malloc`.
 - `memory-option`: `--memory-limit` sets the limit, `0` removes it, `--help` lists it, and a value that isn't a whole number of 0 or more is a usage error.
 
 ## How to get to it (user POV)
@@ -27,4 +27,5 @@ Preconditions:
 ## Gotchas
 
 - The limit is per process: a test command that starts many processes can take more in total. The sandbox's scope caps the total.
+- `RLIMIT_DATA` counts private memory only. A shared mapping, such as Python's `mmap.mmap(-1, n)` or `/dev/shm`, isn't counted. `RLIMIT_AS` would count it, but it would stop the JVM, Go, and Node, which reserve large address spaces they never write.
 - On macOS, the kernel doesn't hold `mmap` to `RLIMIT_DATA`, so the limit may not stop a process there.

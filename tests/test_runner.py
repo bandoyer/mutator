@@ -598,7 +598,8 @@ def test_the_memory_limit_is_set_in_kib_and_0_sets_none(tmp_path):
     def soft_limit(runner):
         return runner.run("ulimit -S -d", tmp_path, 5).output
 
-    assert soft_limit(CommandRunner(memory_limit=2048)) == "2097152\n"
+    # The hard limit too, so no process the command starts can raise it again.
+    assert CommandRunner(memory_limit=2048).run("ulimit -S -d; ulimit -H -d", tmp_path, 5).output == "2097152\n" * 2
     assert soft_limit(CommandRunner(memory_limit=1)) == "1024\n"
     assert soft_limit(CommandRunner(memory_limit=0)) == soft_limit(CommandRunner())
     assert _limited("true", 0) == "true"

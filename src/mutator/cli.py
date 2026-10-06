@@ -123,10 +123,11 @@ named {_skipped_directory_text()} are skipped.
 The default, once a snapshot exists, reruns survivors. It keeps a killed
 mutant only when no file git lists for the project changed, apart from
 .metrics/ and mutator's own folders under target/, and the test command, its
-directory, and --timeout-factor are the same. Any edit to a tracked or
-untracked file reruns every killed mutant. Outside a git repository nothing is
-kept. When kills are kept, the baseline still runs, so tests that fail now stop
-the file with exit 2. --mutate-all is unchanged: it reruns every covered site.
+directory, --timeout-factor, and --memory-limit are the same. Any edit to a
+tracked or untracked file reruns every killed mutant. Outside a git repository
+nothing is kept. When kills are kept, the baseline still runs, so tests that
+fail now stop the file with exit 2. --mutate-all is unchanged: it reruns every
+covered site.
 
 Selected mutants of one file run at the same time, one worker per core unless
 --max-workers says otherwise. A worker is a symlink overlay under

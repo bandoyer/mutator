@@ -18,6 +18,7 @@ from mutator.workers import create_workers, delete_tree, new_run_dir, worker_cou
 class FakeRunner:
     def __init__(self):
         self.verbose = False
+        self.memory_limit = 0
         self.calls = 0
         self._lock = threading.Lock()
 
@@ -131,6 +132,7 @@ def test_a_failed_baseline_does_not_rewrite_metrics(tmp_path):
 
     class Red:
         verbose = False
+        memory_limit = 0
 
         def run(self, command, cwd, timeout):
             return CommandResult(code=1, timed_out=False, seconds=0.01, output="nope")
@@ -252,6 +254,7 @@ def test_a_mutation_run_leaves_the_project_tree_unchanged(tmp_path):
 
     class Record:
         verbose = False
+        memory_limit = 0
 
         def run(self, command, cwd, timeout):
             if timeout != BASELINE_TIMEOUT:

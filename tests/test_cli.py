@@ -598,6 +598,7 @@ _F_SURVIVED = re.compile(r"^SURVIVED +src/demo\.py:2 1 -> 0$", re.M)
         pytest.param({}, lambda root: _write(root / "skip.cfg", "f\n"), [], True, id="config-changed"),
         pytest.param({}, lambda root: None, ["--test-command", f"{sys.executable} check.py h"], True, id="command-changed"),
         pytest.param({}, lambda root: None, ["--timeout-factor", "20"], True, id="timeout-factor-changed"),
+        pytest.param({}, lambda root: None, ["--memory-limit", "4096"], True, id="memory-limit-changed"),
         pytest.param(
             {
                 "src/app.py": "from demo import f\n\n\ndef g():\n    return f()\n",
@@ -630,7 +631,7 @@ def test_a_kept_kill_is_run_again_when_its_test_context_changed(tmp_path, capsys
     change(root)
     runs = log.read_text().count("run")
     code, second = _kept_run(root, capsys, *args, "src/demo.py")
-    if "--timeout-factor" in args:
+    if args[:1] in (["--timeout-factor"], ["--memory-limit"]):
         # The same tests kill the mutant again, so it must be run, not kept:
         # the baseline, the worker's control run, and three mutants.
         assert code == 0, second.err
@@ -717,7 +718,7 @@ def test_the_same_timeout_factor_spelled_another_way_keeps_the_kill(tmp_path, ca
 
 
 @pytest.mark.parametrize(("limit", "status"), [("64", "KILLED"), ("0", "SURVIVED")])
-def test_a_mutant_that_passes_the_memory_limit_is_killed(tmp_path, capsys, limit, status):
+def test_a_mutant_is_killed_when_it_passes_the_memory_limit_and_survives_with_none(tmp_path, capsys, limit, status):
     # Issue #58: the mutant 0 -> 1 makes the test ask for 128 MiB.
     (tmp_path / "demo.py").write_text("def size():\n    return 0\n", encoding="utf-8")
     command = f"{sys.executable} -c 'import demo; bytes(demo.size() * 128 << 20)'"
