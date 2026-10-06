@@ -7,6 +7,7 @@ Before a worker runs its first mutant, it runs the project's tests once on the u
 - `control-cold-build` lets a mutant survive when the worker's first build is slower than the timeout and the tests can't catch the mutant.
 - `control-bujo-weak` runs bujo with a test command that can't fail: every mutant survives.
 - `control-broken-worker` stops with exit code 2 when the test command works in the project but not in a worker.
+- `control-own-temp` gives each worker a temp folder of its own (`TMPDIR`), outside the project, for all of the worker's runs, and removes it with the worker. Parallel pytest sessions that share a temp folder share one basetemp root and prune each other's folders (issue #54).
 
 ## How to get to it (user POV)
 
@@ -23,6 +24,7 @@ Preconditions:
 - **control-cold-build.** `project=$($vm project cold-build)`. Warm the project's own build with `$vm exec "$project" "$T" cargo test -q` (exit `0`, about 7 s). Then run `$vm drive "$project" "$T" --no-coverage --mutate-all src/lib.rs`. Pass: exit code `3`, `SURVIVED  src/lib.rs:2 1 -> 0`, `Total ... 0 1 0 1 0.0%`, and worker folders `(none)`. The bug shows as `KILLED`, exit `0`, after about 2 s.
 - **control-bujo-weak.** `project=$($vm project ~/Work/bujo)`. Warm it with `$vm exec "$project" "$T" cargo test -q`. Then run `$vm drive "$project" "$T" --mutate-all --no-coverage --test-command 'cargo test >/dev/null 2>&1; true' src`. Pass: exit code `3`, every mutant line reads `SURVIVED` (12 at bujo 878b1a8), and worker folders `(none)`. The bug shows as every mutant `KILLED` and exit `0`.
 - **control-broken-worker.** `project=$($vm project fixture)`. Give it a virtualenv with `$vm exec "$project" "$T" python3 -m venv .venv`. Then run `$vm drive "$project" "$T" --no-coverage --max-workers 1 --test-command './.venv/bin/python -c "import demo; assert demo.f() in (True, False)"' demo.py`. The assertion accepts the original and every mutant, and works in the project. Workers don't link `.venv`, so it fails there. Pass: exit code `2`, stderr says the unmutated tests failed in a worker, no `KILLED` line, no `.metrics/mutate/demo.edn` written, and worker folders `(none)`. The bug shows as three `KILLED` lines and exit `0`.
+- **control-own-temp.** `project=$($vm project fixture)` and `log=$(dirname "$project")/temps.log`. Run `$vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 2 --test-command "python3 -c 'import os, tempfile; print(os.getcwd(), tempfile.gettempdir())' >> $log" demo.py`, then `cat "$log"`. The command always passes, so every mutant survives. Pass: exit code `3`; the lines whose folder is in `target/mutation-workers` name two workers; each worker's lines name one temp folder, which no other worker's lines name; that folder is neither `$TMPDIR` nor inside the project; `ls` of each one fails, as it is gone; and worker folders `(none)`. The bug shows as both workers naming the same temp folder, mutator's own `$TMPDIR`.
 
 ## Gotchas
 
