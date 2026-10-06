@@ -714,3 +714,13 @@ def test_the_same_timeout_factor_spelled_another_way_keeps_the_kill(tmp_path, ca
     assert code == 0, second.err
     assert _F_KILLED.search(second.out)
     assert log.read_text().count("run") - runs == 1
+
+
+@pytest.mark.parametrize(("limit", "status"), [("64", "KILLED"), ("0", "SURVIVED")])
+def test_a_mutant_that_passes_the_memory_limit_is_killed(tmp_path, capsys, limit, status):
+    # Issue #58: the mutant 0 -> 1 makes the test ask for 128 MiB.
+    (tmp_path / "demo.py").write_text("def size():\n    return 0\n", encoding="utf-8")
+    command = f"{sys.executable} -c 'import demo; bytes(demo.size() * 128 << 20)'"
+    args = ["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", "--lines", "2"]
+    run([*args, "--memory-limit", limit, "--test-command", command, "demo.py"])
+    assert re.search(rf"^{status} +demo.py:2 0 -> 1$", capsys.readouterr().out, re.MULTILINE)

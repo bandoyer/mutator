@@ -15,7 +15,7 @@ from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
 from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest, scan_file
 from mutator.report import format_results, format_site_log
-from mutator.runner import CommandResult, CommandRunner
+from mutator.runner import MEMORY_LIMIT, CommandResult, CommandRunner
 from mutator.workers import inside_workers
 
 
@@ -105,6 +105,10 @@ Options:
                                 once. Default: one per core. The run uses the
                                 smaller of this limit, the cores, and the
                                 number of selected sites.
+  --memory-limit <MiB>          Limit each test process's data memory
+                                (RLIMIT_DATA) to this many MiB, so a mutant
+                                that allocates without bound fails and is
+                                killed. 0 means no limit. Default: {MEMORY_LIMIT}.
   --verbose                     Print each test command, how it ended, and
                                 each mutant.
 
@@ -175,6 +179,7 @@ class Options:
     baseline_timeout: float = BASELINE_TIMEOUT
     mutation_warning: int = 50
     max_workers: int | None = None
+    memory_limit: int = MEMORY_LIMIT
     changed: bool = False
     verbose: bool = False
 
@@ -256,6 +261,10 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 continue
             if arg == "--max-workers":
                 options.max_workers = _integer(_take(args, index, arg), arg, 1, "a positive integer")
+                index += 2
+                continue
+            if arg == "--memory-limit":
+                options.memory_limit = _integer(_take(args, index, arg), arg, 0, "a whole number of MiB, 0 or more")
                 index += 2
                 continue
             if arg == "--lines":
@@ -566,7 +575,7 @@ def _finish(stopped: bool, survived: bool) -> int:
 
 
 def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> int:
-    runner = CommandRunner(verbose=options.verbose)
+    runner = CommandRunner(verbose=options.verbose, memory_limit=options.memory_limit)
     baselines: dict[tuple[tuple[str, ...], str], CommandResult] = {}
     forms = []
     written: list[str] = []

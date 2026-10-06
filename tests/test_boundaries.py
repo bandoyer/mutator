@@ -373,6 +373,12 @@ def test_options_reject_bad_values_and_keep_flag_defaults(monkeypatch):
     assert parse_args(["--max-workers", "nope"]).exit_code == 1
     assert parse_args(["--scan", "--max-workers", "2"]).exit_code == 1
     assert parse_args(["--not-a-flag"]).exit_code == 1
+    assert parse_args([]).memory_limit == 2048
+    assert parse_args(["--memory-limit", "0"]).memory_limit == 0
+    assert parse_args(["--memory-limit", "1"]).memory_limit == 1
+    for value in ["-1", "2G", "1.5", ""]:
+        assert parse_args(["--memory-limit", value]).message.startswith("--memory-limit requires"), value
+    assert "--memory-limit <MiB>" in HELP
     monkeypatch.setattr(sys, "argv", ["prog", "--verbose"])
     options = parse_args(None)
     assert options.verbose is True
