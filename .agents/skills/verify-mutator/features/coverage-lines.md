@@ -22,7 +22,7 @@ Preconditions:
   $vm exec "$project" "$T" sh -c 'mkdir -p src && git mv demo.py src/demo.py && printf "\n\ndef g(a, b):\n    return max(\n        a + b,\n        a - b,\n    )\n" >>src/demo.py && printf "\n\ndef test_g():\n    from demo import g\n    assert g(3, 1) == 4\n" >>test_demo.py && printf "[tool.pytest.ini_options]\ntestpaths = [\".\"]\npythonpath = [\"src\"]\n" >pyproject.toml && git -c user.name=verify -c user.email=verify@localhost commit -qam continuation && uv venv -q .venv && VIRTUAL_ENV=.venv uv pip install -q coverage pytest'
   ```
 
-- **coverage-continuation.** Run `$vm drive "$project" "$T" --mutate-all src/demo.py`. Pass: exit code `3`, `KILLED    src/demo.py:7 + -> -`, `SURVIVED  src/demo.py:8 - -> +`, and no `UNCOVERED` line. The bug shows as `UNCOVERED src/demo.py:7 + -> -`, `UNCOVERED src/demo.py:8 - -> +`, and exit code `0`. Then run `$vm drive "$project" "$T" --scan src/demo.py`. Pass: exit code `0`, and the lines for `src/demo.py:7` and `src/demo.py:8` don't end in `uncovered`.
+- **coverage-continuation.** Run `$vm drive "$project" "$T" --mutate-all src/demo.py`. Pass: exit code `3`, `KILLED    src/demo.py:7 + -> -`, `SURVIVED  src/demo.py:8 - -> +`, and no `UNCOVERED` line. The bug shows as `UNCOVERED src/demo.py:7 + -> -`, `UNCOVERED src/demo.py:8 - -> +`, and exit code `0`. Then run `$vm drive "$project" "$T" --scan src/demo.py`. Pass: exit code `0`, with `src/demo.py:7 + -> -  [defn/g]` and `src/demo.py:8 - -> +  [defn/g]`, and no `uncovered` on either line. The bug shows as `src/demo.py:7 + -> - uncovered  [defn/g]`.
 
 ## Gotchas
 

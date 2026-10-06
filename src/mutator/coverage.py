@@ -223,8 +223,9 @@ def _statement_starts(source_path: Path) -> dict[int, int]:
     """Map each line of a Python statement to the statement's first line.
 
     A statement runs from its first token to the end of its logical line, as
-    coverage.py's `multiline_map_from_tokens` splits it. Empty when tokenize
-    can't read the source.
+    coverage.py's `multiline_map_from_tokens` splits it. When tokenize stops
+    partway, such as at syntax newer than this Python's, the map keeps the
+    statements before that point.
     """
 
     starts: dict[int, int] = {}
@@ -238,7 +239,7 @@ def _statement_starts(source_path: Path) -> dict[int, int]:
                 elif not first and token.string.strip() and token.type != tokenize.COMMENT:
                     first = token.start[0]
     except (OSError, SyntaxError, ValueError, tokenize.TokenError):
-        return {}
+        pass
     return starts
 
 

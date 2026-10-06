@@ -133,6 +133,10 @@ def test_lcov_covers_every_line_of_a_python_statement_whose_first_line_is_hit(tm
     )
     assert covered_lines(tmp_path, source, "python") == {2, 3, 4, 7, 8, 9, 10, 11, 14, 19, 20, 21, 22, 23}
 
+    # tokenize stops at an unclosed string: the statements before it keep their lines.
+    source.write_text("# c\nLIMIT = max(\n    1,\n    2)\nopen = '''\n", encoding="utf-8")
+    assert covered_lines(tmp_path, source, "python") == {2, 3, 4, 7, 8, 14, 19, 20, 22}
+
     # A source tokenize can't read keeps the report's own lines.
     source.write_text("def place(:\n    return (1 +\n", encoding="utf-8")
     assert covered_lines(tmp_path, source, "python") == {2, 7, 8, 14, 19, 20, 22}
