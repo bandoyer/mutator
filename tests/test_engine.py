@@ -618,6 +618,30 @@ def test_folders_a_test_locked_in_its_temp_folder_are_removed_but_not_through_a_
         outside.chmod(0o700)
 
 
+def test_a_run_temp_folder_a_test_replaced_with_a_link_is_unlinked_and_its_target_left_alone(tmp_path, capsys):
+    # A test that replaces the run's temp folder with a symlink must not get
+    # the cleanup to change permissions on the link's target (review D2).
+    outside = tmp_path / "outside"
+    (outside / "locked").mkdir(parents=True)
+    (outside / "locked").chmod(0o500)
+    outside.chmod(0o500)
+
+    def replace(temp):
+        if not temp.parent.is_symlink():
+            shutil.rmtree(temp.parent)
+            temp.parent.symlink_to(outside)
+
+    try:
+        temps = _mutate_in_worker(tmp_path, replace)
+        assert outside.stat().st_mode & 0o777 == 0o500
+        assert (outside / "locked").stat().st_mode & 0o777 == 0o500
+        assert not os.path.lexists(temps[0].parent)
+        assert "could not remove" not in capsys.readouterr().err
+    finally:
+        outside.chmod(0o700)
+        (outside / "locked").chmod(0o700)
+
+
 def test_a_temp_folder_that_cannot_be_removed_is_named(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("mutator.workers.shutil.rmtree", lambda path, ignore_errors: None)
     temps = _mutate_in_worker(tmp_path, lambda temp: None)

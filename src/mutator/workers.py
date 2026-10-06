@@ -332,9 +332,13 @@ def _remove_temp(folder: str) -> None:
     """Remove a run's temp folder, also folders its tests left unreadable or read-only.
 
     Folders are opened up first, never through a symlink, whose target can be a
-    project folder. What still can't be removed is named on stderr.
+    project folder. A test can even replace the run's folder with one: then
+    only the link goes. What still can't be removed is named on stderr.
     """
 
+    if os.path.islink(folder):
+        os.unlink(folder)
+        return
     with contextlib.suppress(OSError):
         os.chmod(folder, 0o700)
         for parent, names, _files in os.walk(folder):
