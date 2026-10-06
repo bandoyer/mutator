@@ -56,7 +56,7 @@ The features you can drive, and the end state that proves each one, are in [feat
 - Put transcripts where the caller asks, for example `<run folder>/artifacts/verify/round-1/criterion-1.txt`. Never put them inside the scratch project: cleanup removes it.
 - Proof is the transcript: the action (command), what the user saw (stdout, stderr, exit code), and the side effects (worker folders left, processes left, tracked files changed). Check all three.
 - Use the real user path only: the `./mutator` launcher with real arguments, or the project's own script. Don't import `mutator` in Python, and don't treat `pytest` as proof.
-- Exit codes: `0` every executed mutant was killed, `2` the baseline failed, `3` a mutant survived. A Python traceback exits `1`.
+- Exit codes: `0` every executed mutant was killed, `2` the baseline failed or a coverage run failed but wrote a report, `3` a mutant survived. A Python traceback exits `1`.
 
 ## Cleanup
 
