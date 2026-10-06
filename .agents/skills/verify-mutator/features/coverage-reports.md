@@ -1,6 +1,6 @@
 # Coverage reports
 
-A default `mutator` run (no `--no-coverage`, `--use-existing-coverage`, or `--coverage-command`) runs crapper's coverage tool for each language, then reads only the reports those tools wrote in this run. A report they didn't write, such as an earlier run's `coverage/lcov.info`, a hand-made root `coverage.out`, or an old root `target/site/jacoco/jacoco.xml`, is ignored and left on disk. A site on a line no report hits is `UNCOVERED` and doesn't run. `--use-existing-coverage`, `--coverage-command`, and `--scan` still read every report on disk.
+A default `mutator` run (no `--no-coverage`, `--use-existing-coverage`, or `--coverage-command`) runs crapper's coverage tool for each language, then reads only the reports those tools wrote in this run. A report they didn't write, such as an earlier run's `coverage/lcov.info`, a hand-made root `coverage.out`, or an old root `target/site/jacoco/jacoco.xml`, is ignored and left on disk. A site on a line no report hits is `UNCOVERED` and doesn't run. When a coverage run fails but still writes a report (crapper returns its exit status in `Report.code`, crapper#55), mutator names that report and stops before any mutant runs, as it does for a failed `--coverage-command`, but with exit `2` (a failed `--coverage-command` exits with that command's status). `--use-existing-coverage`, `--coverage-command`, and `--scan` still read every report on disk.
 
 When no report lists a source file, coverage didn't measure it: its tool is missing or failed, it has no module, or the reports leave it out. A run that reads coverage then stops that file. None of its sites runs or prints, its snapshot is not written, stderr names it and how to go on, and the run exits `2`. Other files still run. A file a report does list, even with zero hits on every line, is measured: its sites are `UNCOVERED` as usual.
 
@@ -9,6 +9,7 @@ When no report lists a source file, coverage didn't measure it: its tool is miss
 - `coverage-leftover` ignores a leftover `coverage/lcov.info` that marks an untested function as hit, so that function's sites are `UNCOVERED`.
 - `coverage-existing` still reads that leftover with `--use-existing-coverage`.
 - `coverage-unmeasured` stops a file whose project has no coverage.py, with exit `2`, and `--no-coverage` still runs its sites.
+- `coverage-failed-run` stops with exit `2`, and runs no mutant, when a coverage run fails but still writes a report (#66).
 
 ## How to get to it (user POV)
 
@@ -36,6 +37,14 @@ Preconditions:
   ```
 
   Run `$vm drive "$project" "$T" --mutate-all src/demo.py`, then `$vm exec "$project" "$T" find . -path ./.venv -prune -o -name '*.edn' -print`. Pass: exit code `2`, stdout has no `KILLED`, `SURVIVED`, or `UNCOVERED` line, stderr has `No coverage data for src/demo.py`, says none of its 3 sites ran, and names `--no-coverage`, and `find` prints nothing. The bug shows as exit code `0`, three `UNCOVERED src/demo.py:2` lines, and `./.metrics/mutate/demo.edn`. Then run `$vm drive "$project" "$T" --no-coverage --mutate-all src/demo.py`. Pass: exit code `0` and three `KILLED    src/demo.py:2` lines.
+
+- **coverage-failed-run.** Needs a crapper with `Report.code` (bandoyer/crapper cf6b041 or later) in the checkout's `.venv` or at `../crapper`. In a fresh project, `project=$($vm project fixture)`, move to the `src/` layout, and make the only test fail under coverage.py alone:
+
+  ```bash
+  $vm exec "$project" "$T" sh -c 'mkdir -p src && git mv demo.py src/demo.py && printf "import sys\n\nfrom demo import f\n\n\ndef test_f():\n    assert \"coverage\" not in sys.modules, \"fails only under coverage.py\"\n    assert f() is True\n" >test_demo.py && printf "[tool.pytest.ini_options]\ntestpaths = [\".\"]\npythonpath = [\"src\"]\n" >pyproject.toml && git -c user.name=verify -c user.email=verify@localhost commit -qam fails-under-coverage && uv venv -q .venv && VIRTUAL_ENV=.venv uv pip install -q coverage pytest'
+  ```
+
+  Run `$vm drive "$project" "$T" --mutate-all src/demo.py`, then `$vm exec "$project" "$T" find . -path ./.venv -prune -o -name '*.edn' -print`. Pass: exit code `2`. stdout has no `KILLED`, `SURVIVED`, or `UNCOVERED` line. stderr has crapper's `Python coverage exited 1 in …, but wrote …/target/coverage/python/lcov.info`, then `Coverage report from a failed run: …/target/coverage/python/lcov.info (exited 1 in …).`, and a `No mutant ran:` line that names `--no-coverage`. `find` prints nothing. The bug (#66) shows as exit code `0`, three `UNCOVERED src/demo.py:2` lines, and `./.metrics/mutate/demo.edn`. Then run `$vm drive "$project" "$T" --no-coverage --mutate-all src/demo.py`. Pass: exit code `0` and three `KILLED    src/demo.py:2` lines.
 
 ## Gotchas
 

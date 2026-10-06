@@ -142,8 +142,9 @@ Exit codes:
   0  every executed mutant was killed, or there was nothing to run
   1  usage error, a backup that differs from its source, or a project root
      inside target/mutation-workers
-  2  baseline tests failed, in the project or in a worker, or a file had no
-     coverage data, so none of its sites ran
+  2  baseline tests failed, in the project or in a worker, a file had no
+     coverage data, so none of its sites ran, or a coverage run failed but
+     wrote a report
   3  at least one mutant survived
 
 Coverage, when it is produced, uses the same commands as crapper:
@@ -159,6 +160,9 @@ A file no report lists has no coverage data: its tool is missing or failed,
 or the reports leave it out. None of its sites runs, its snapshot is left as
 it was, and the run exits 2. Fix its coverage, leave it out of the run, or
 pass --no-coverage.
+When a coverage run fails but still writes a report, mutator names the report
+and stops with exit 2 before any mutant runs: the failed run may have missed
+lines its tests never reached. Pass --no-coverage to run every site.
 """
 
 
@@ -497,7 +501,34 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> tuple[
                 print(tail, file=sys.stderr)
             return result.code, None
         return 0, None
-    return 0, ensure_crapper().runners.collect_coverage(root, files)
+    reports = ensure_crapper().runners.collect_coverage(root, files)
+    if _failed_coverage(reports):
+        return 2, None
+    return 0, reports
+
+
+def _failed_coverage(reports) -> bool:
+    """Name each report a failed coverage run wrote. True when there is one.
+
+    A failed run can still write a report (crapper#55). Sites that only the
+    failed run would reach then read as uncovered, so the run stops before any
+    mutant runs. An older crapper's reports have no `code`: they count as from
+    a run that succeeded.
+    """
+
+    failed = [report for report in reports or [] if getattr(report, "code", 0) != 0]
+    for report in failed:
+        print(
+            f"Coverage report from a failed run: {report.path} (exited {report.code} in {report.module}).",
+            file=sys.stderr,
+        )
+    if failed:
+        print(
+            "No mutant ran: a failed coverage run's report can miss lines its tests never reached. "
+            "Fix the coverage run, or pass --no-coverage to run every site.",
+            file=sys.stderr,
+        )
+    return bool(failed)
 
 
 def _coverage_for(options: Options, root: Path, path: Path, reports=None) -> set[int] | None:
