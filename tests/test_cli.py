@@ -393,8 +393,11 @@ def test_a_file_no_coverage_report_lists_stops_with_exit_2_and_runs_none_of_its_
 
     out, err = capsys.readouterr()
     assert code == 2
-    sites = re.findall(r"^(?:KILLED|SURVIVED|UNCOVERED|TIMEOUT) +(\S+):(\d+) ", out, re.M)
-    assert {(relative, int(line)) for relative, line in sites} == {(r, n) for r, lines in ran.items() for n in lines}
+    # A site that ran prints SURVIVED under `--test-command true`; an UNCOVERED line did not run.
+    sites = re.findall(r"^(SURVIVED|UNCOVERED|KILLED|TIMEOUT) +(\S+):(\d+) ", out, re.M)
+    assert {(status, relative, int(line)) for status, relative, line in sites} == {
+        ("SURVIVED", r, n) for r, lines in ran.items() for n in lines
+    }
     snapshots = "".join(path.read_text() for path in tmp_path.glob(".metrics/mutate/**/*.edn"))
     for relative in stopped:
         assert f'"{relative}"' not in snapshots
