@@ -23,7 +23,7 @@ This folder is the maintained source for verifying what a mutator user sees. Rea
 ## Features
 
 - [Mutate a file](./mutate-file.md) covers killing every mutant, a surviving mutant, and listing sites with `--scan`.
-- [Worker cleanup](./worker-cleanup.md) covers removing every worker folder, including when the test command leaves a process running in the worker, when mutator gets SIGTERM or Ctrl-C, and when a nested mutator run's command times out. It also covers the order of signals and reaps, and Ctrl-C while a background process holds a test command's output.
+- [Worker cleanup](./worker-cleanup.md) covers removing every worker folder, including when the test command leaves a process running in the worker, when mutator gets SIGTERM or Ctrl-C, and when a nested mutator run's command times out. It also covers refusing a nested run whose root is inside `target/mutation-workers`, the order of signals and reaps, and Ctrl-C while a background process holds a test command's output.
 - [Control runs](./control-run.md) covers each worker's run of the unmutated tests before its first mutant: a cold worker build doesn't turn mutants into timeouts, and a worker whose unmutated tests fail stops the run.
 - [A project's measure script](./project-measure.md) covers a real project's own script that calls mutator, such as bujo's `scripts/measure`.
 - [Run time limit](./run-time-limit.md) covers `--baseline-timeout`: a baseline or control run that hangs, even one that ignores SIGTERM, stops the file with exit code 2 and leaves no test process running.

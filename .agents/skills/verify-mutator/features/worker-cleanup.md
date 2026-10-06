@@ -13,6 +13,7 @@ When mutator gets SIGTERM (what `timeout` and `kill` send) or Ctrl-C, it stops e
 - `cleanup-order` sends no signal to a test command's group after mutator has reaped that group's leader, for a normal run, a test command that leaves a background process, and a baseline timeout.
 - `cleanup-ctrl-c-held` stops a background process that still holds the test command's output when Ctrl-C comes after the command's shell has exited: during the baseline, and during a timeout's 1 s grace.
 - `cleanup-nested-timeout` lets a mutator run nested in a test command clean up when the outer run's timeout stops that command (issue #21).
+- `nested-run-refused` refuses a mutator run whose project root is inside `target/mutation-workers`, before it runs any command (issue #57). A mutant in mutator's own tests can start such a run in the worker it is tested in, and each one would start the next.
 
 ## How to get to it (user POV)
 
@@ -51,17 +52,30 @@ Preconditions:
   - During the timeout's grace: the shell exits on SIGTERM, and its background sleep ignores SIGTERM. `$vm signal "$project" "$T" INT 1.6 --no-coverage --mutate-all --max-workers 1 --baseline-timeout 1 --test-command "case \"\$PWD\" in *mutation-workers*) exit 0;; esac; trap 'exit 0' TERM; (trap '' TERM; exec sleep 30) & wait" demo.py`.
 
   Pass for both: exit code `130`, worker folders `(none)`, and processes left `(none)`. The bug shows as `sleep 30` in processes left.
-- **cleanup-nested-timeout.** The outer test command runs a second mutator on the outer worker. The inner control run keeps writing files in the inner worker, so the outer control run hangs until `--baseline-timeout 3` stops it:
+- **cleanup-nested-timeout.** The outer test command, in its worker, runs a second mutator in `inner/`. The worker reaches `inner/` through a link, so the inner run's root is the project's own `inner/`, outside `target/mutation-workers`, and `nested-run-refused` doesn't apply. The inner control run keeps writing files in the inner worker, so the outer control run hangs until `--baseline-timeout 3` stops it:
 
   ```bash
   project=$($vm project fixture)
   scripts=$(dirname "$project")
-  printf 'case "$PWD" in */mutation-workers/*/mutation-workers/*) end=$(( $(date +%%s) + 30 )); i=0; while [ "$(date +%%s)" -lt "$end" ]; do : > "w$i"; i=$((i+1)); done;; esac\nexit 0\n' >"$scripts/inner.sh"
-  printf 'case "$PWD" in */mutation-workers/*) exec %s --no-coverage --mutate-all --max-workers 1 --test-command "sh %s/inner.sh" demo.py;; esac\nexit 0\n' "$PWD/mutator" "$scripts" >"$scripts/outer.sh"
+  mkdir "$project/inner" && cp "$project/demo.py" "$project/inner/"
+  printf 'case "$PWD" in */inner/target/mutation-workers/*) end=$(( $(date +%%s) + 30 )); i=0; while [ "$(date +%%s)" -lt "$end" ]; do : > "w$i"; i=$((i+1)); done;; esac\nexit 0\n' >"$scripts/inner.sh"
+  printf 'case "$PWD" in */target/mutation-workers/*) cd inner && exec %s --no-coverage --mutate-all --max-workers 1 --test-command "sh %s/inner.sh" demo.py;; esac\nexit 0\n' "$PWD/mutator" "$scripts" >"$scripts/outer.sh"
   $vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 1 --baseline-timeout 3 --test-command "sh $scripts/outer.sh" demo.py
+  ls -A "$project/inner/target/mutation-workers"
   ```
 
-  Run it from the repo root, so `$PWD/mutator` is this checkout's launcher. Pass: exit code `2`, stderr says `Unmutated tests timed out after 3 s in a mutation worker for demo.py`, no traceback, worker folders `(none)`, and processes left `(none)`. The bug shows as exit code `1` with `OSError: [Errno 39] Directory not empty: '.../worker-0/target/mutation-workers/run-<id>/worker-0'`, a `run-<id>` folder, and `sh .../inner.sh` left running.
+  Run it from the repo root, so `$PWD/mutator` is this checkout's launcher. Pass: exit code `2`, stderr says `Unmutated tests timed out after 3 s in a mutation worker for demo.py`, no traceback, worker folders `(none)`, processes left `(none)`, and the last `ls` prints nothing: the inner run removed its own `run-<id>` folder. The bug shows as a `run-<id>` folder in `inner/target/mutation-workers`, and `sh .../inner.sh` left running.
+- **nested-run-refused.** The outer test command, in its worker, runs a second mutator there with no `--root`, so its root is the worker. That inner run's test command only touches a file, so the recipe stays small even where the refusal is missing:
+
+  ```bash
+  project=$($vm project fixture)
+  scripts=$(dirname "$project")
+  printf 'case "$PWD" in */target/mutation-workers/*) exec %s --no-coverage --mutate-all --max-workers 1 --test-command "touch %s/nested-ran" demo.py;; esac\nexit 0\n' "$PWD/mutator" "$scripts" >"$scripts/nest.sh"
+  $vm drive "$project" "$T" --no-coverage --mutate-all --max-workers 1 --test-command "sh $scripts/nest.sh" demo.py
+  ls "$scripts/nested-ran"
+  ```
+
+  Run it from the repo root. Pass: exit code `2` within seconds, stderr says `Unmutated tests failed in a mutation worker for demo.py` and `mutator does not run in <project>/target/mutation-workers/run-<id>/worker-0: it is inside target/mutation-workers`, worker folders `(none)`, processes left `(none)`, and `ls` finds no `nested-ran`: the refused run started no command. The bug shows as a `nested-ran` file and no `does not run in` line: the inner run mutated the outer worker. In mutator's own tests, that inner run's tests start the next one (#57).
 
 ## Gotchas
 
