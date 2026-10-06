@@ -34,11 +34,11 @@ from mutator.engine import (
     _backup,
     _carry_forward,
     _covered,
-    _drop_bytecode,
     _forms,
     mutate_file,
     scan_file,
 )
+from mutator.workers import _drop_bytecode
 from mutator.functions import (
     _mutation_field,
     _owner,

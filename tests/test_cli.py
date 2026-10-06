@@ -1,4 +1,5 @@
 import collections
+import py_compile
 import re
 import shlex
 import signal
@@ -970,3 +971,67 @@ def test_an_older_crappers_reports_have_no_status_and_are_scored(tmp_path, monke
     assert code == 3
     assert f"SURVIVED  {source}:2" in captured.out
     assert "from a failed run" not in captured.err
+
+
+
+# Issue #82. Each site of `1 + 0` is the size of the source: 1 -> 0 and 0 -> 1 must be killed, and
+# + -> - leaves 1, so it survives. A mutant that ran a .pyc of the original would survive.
+_OWN_SOURCE = "def f():\n    return 1 + 0\n"
+_OWN_STATUSES = [("KILLED", "1 -> 0"), ("SURVIVED", "+ -> -"), ("KILLED", "0 -> 1")]
+_PY = shlex.quote(sys.executable)
+_PYTEST = f"{_PY} -m pytest -q -p no:cacheprovider"
+
+
+def _own_source_project(tmp_path: Path, pyc: str | None) -> tuple[Path, Path]:
+    """src/demo.py, its test, and, unless `pyc` is None, a .pyc of it in that invalidation mode."""
+
+    source = tmp_path / "src" / "demo.py"
+    source.parent.mkdir()
+    source.write_text(_OWN_SOURCE, encoding="utf-8")
+    (tmp_path / "test_demo.py").write_text("from demo import f\n\n\ndef test_f():\n    assert f() == 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\npythonpath = ['src']\n", encoding="utf-8")
+    cache = source.parent / "__pycache__" / f"demo.{sys.implementation.cache_tag}.pyc"
+    if pyc is not None:
+        mode = py_compile.PycInvalidationMode[pyc.upper().replace("-", "_")]
+        py_compile.compile(str(source), cfile=str(cache), invalidation_mode=mode, doraise=True)
+    return source, cache
+
+
+def _own_source_command(kind: str, source: Path) -> str:
+    """The test command. `same-mtime` gives the worker's demo.py the project's mtime, as when a
+    mutant is written in the same second. `writes` turns bytecode writing on in a worker only, and
+    gives every write one mtime; mutator's baseline in the project writes nothing.
+    """
+
+    if kind == "same-mtime":
+        utime = f"import os; s = os.stat({str(source)!r}); os.utime('src/demo.py', ns=(s.st_atime_ns, s.st_mtime_ns))"
+        return f"{_PY} -c {shlex.quote(utime)} && {_PYTEST}"
+    if kind == "writes":
+        utime = "import os; os.utime('src/demo.py', (1700000000, 1700000000))"
+        in_worker = f"{_PY} -c {shlex.quote(utime)} && PYTHONDONTWRITEBYTECODE= {_PYTEST}"
+        return f"case $(pwd -P) in */target/mutation-workers/*) {in_worker} ;; *) {_PYTEST} ;; esac"
+    return _PYTEST
+
+
+@pytest.mark.parametrize(
+    ("pyc", "kind"),
+    [
+        pytest.param("timestamp", "same-mtime", id="original-timestamp-pyc-same-second"),
+        pytest.param("unchecked-hash", "plain", id="original-unchecked-hash-pyc"),
+        pytest.param(None, "writes", id="test-command-writes-bytecode"),
+        pytest.param("timestamp", "writes", id="test-command-writes-bytecode-beside-the-projects"),
+        pytest.param("checked-hash", "plain", id="control-checked-hash-pyc"),
+        pytest.param(None, "same-mtime", id="control-same-mtime-no-pyc"),
+        pytest.param(None, "plain", id="control-no-pyc"),
+    ],
+)
+def test_a_mutant_runs_its_own_source_and_leaves_the_projects_bytecode_alone(tmp_path, capsys, pyc, kind):
+    source, cache = _own_source_project(tmp_path, pyc)
+    before = cache.read_bytes() if pyc else None
+    command = _own_source_command(kind, source)
+    code = run(["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", "--test-command", command, str(source)])
+    out = capsys.readouterr().out
+    assert re.findall(r"^(KILLED|SURVIVED) +src/demo.py:2 (.+)$", out, re.M) == _OWN_STATUSES
+    assert code == 3
+    if pyc:
+        assert cache.read_bytes() == before

@@ -111,21 +111,26 @@ def delete_tree(path: Path) -> None:
 
 # A nested .git can name the project's repository, so no worker gets one.
 VCS = frozenset({".git", ".hg", ".svn"})
+# A __pycache__ holds bytecode of the project's own sources. Python runs a .pyc
+# in place of a source whose mtime, in whole seconds, and size it matches, and
+# an unchecked-hash .pyc whatever the source says. A worker that saw the
+# project's would run the original in place of a same-size mutant (issue #82).
+LEFT_OUT = VCS | {"__pycache__"}
 # Dependencies and build output, below the root, are shared as main shared them:
 # copying a nested .venv or target into every worker has no bound.
-SHARED = (SKIP_LINK - VCS) | {"node_modules"}
+SHARED = (SKIP_LINK - LEFT_OUT) | {"node_modules"}
 
 
 def _copy_entry(destination: Path, source: Path) -> None:
     """Copy `source`, so a test that writes to it writes only in the worker (issue #8).
 
-    Version control folders are left out. A project's own symlinks and the
+    Version control folders and __pycache__ are left out. A project's own symlinks and the
     SHARED folders stay links. A folder that holds mutator's workers stays
     empty, or a worker would copy itself. A FIFO, socket, or device is left
     out: reading one to copy it could block.
     """
 
-    if source.name in VCS:
+    if source.name in LEFT_OUT:
         return
     if source.is_symlink() or source.name in SHARED:
         symlink(destination, source)
@@ -176,6 +181,22 @@ def create_workers(
     return created
 
 
+def _drop_bytecode(path: Path) -> None:
+    """Remove `path`'s .pyc files from its folder's __pycache__ in the worker.
+
+    A test command that writes bytecode leaves the .pyc of the worker's
+    unmutated run, or of its last mutant, beside the source. A same-size
+    mutant written in the same second would load it in place of its own code
+    (issue #82).
+    """
+
+    cache = path.parent / "__pycache__"
+    if not cache.is_dir():
+        return
+    for item in cache.glob(path.stem + ".*.pyc"):
+        item.unlink(missing_ok=True)
+
+
 def mapped_cwd(worker: Path, root: Path, cwd: Path) -> Path:
     try:
         relative = cwd.resolve().relative_to(root.resolve())
@@ -206,6 +227,7 @@ def _execute(
     destination = directory / relative
     mutated = apply_site(original.decode("utf-8"), site.start, site.end, site.mutant)
     destination.write_text(mutated, encoding="utf-8")
+    _drop_bytecode(destination)
     try:
         result = runner.run(command, mapped_cwd(directory, root, cwd), timeout)
     finally:
