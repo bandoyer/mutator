@@ -162,7 +162,7 @@ def test_worker_count_follows_sites_cores_and_the_requested_cap():
     assert worker_count(2, 8) == min(2, cores)
 
 
-def test_workers_copy_the_project_and_link_only_node_modules(tmp_path):
+def test_workers_copy_the_project_and_link_only_shared_folders(tmp_path):
     source = tmp_path / "src" / "demo.py"
     source.parent.mkdir()
     source.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
@@ -174,6 +174,8 @@ def test_workers_copy_the_project_and_link_only_node_modules(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     (tmp_path / "node_modules" / "dep").mkdir(parents=True)
     (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    (tmp_path / "web" / ".venv" / "bin").mkdir(parents=True)
+    (marker.parent / ".git").write_text("gitdir: /project/.git/worktrees/data\n", encoding="utf-8")
     (tmp_path / "tests" / "alias").symlink_to(marker)
     os.mkfifo(tmp_path / "tests" / "pipe")
     original = source.read_bytes()
@@ -192,6 +194,8 @@ def test_workers_copy_the_project_and_link_only_node_modules(tmp_path):
             assert (worker / "tests" / "data" / "keep.txt").read_text(encoding="utf-8") == "keep"
             assert (worker / "node_modules").is_symlink()
             assert (worker / "web" / "node_modules").is_symlink()
+            assert (worker / "web" / ".venv").is_symlink()
+            assert not (worker / "tests" / "data" / ".git").exists()
             assert (worker / "tests" / "alias").is_symlink()
             assert not (worker / "tests" / "pipe").exists()
         for name in ("src/demo.py", "src/other.py", "tests/data/keep.txt"):
@@ -225,6 +229,36 @@ def test_a_source_under_a_linked_or_skipped_folder_gets_real_folders_in_the_work
         (worker / relative).write_text("mutant\n", encoding="utf-8")
         assert not (worker / relative.split("/")[0]).is_symlink()
         assert (worker / relative).parent.joinpath("beside.py").read_text(encoding="utf-8") == "y = 2\n"
+    finally:
+        delete_tree(base)
+
+    assert source.read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_worker_storage_inside_a_copied_folder_is_not_copied_into_the_workers(tmp_path):
+    (tmp_path / "demo.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "mutation-workers").symlink_to(tmp_path / "cache")
+
+    base = new_run_dir(tmp_path)
+    try:
+        for worker in create_workers(base, tmp_path, "demo.py", b"x = 1\n", 2):
+            assert [path.name for path in (worker / "cache").iterdir()] == [base.name]
+            assert list((worker / "cache" / base.name).iterdir()) == []
+    finally:
+        delete_tree(base)
+
+
+def test_a_read_only_source_gets_a_writable_copy_in_the_worker(tmp_path):
+    source = tmp_path / "demo.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    source.chmod(0o444)
+
+    base = new_run_dir(tmp_path)
+    try:
+        worker = create_workers(base, tmp_path, "demo.py", source.read_bytes(), 1)[0]
+        (worker / "demo.py").write_text("mutant\n", encoding="utf-8")
     finally:
         delete_tree(base)
 

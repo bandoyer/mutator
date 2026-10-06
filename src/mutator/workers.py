@@ -19,7 +19,7 @@ from queue import Empty, Queue
 from threading import Lock
 
 from mutator.model import Site
-from mutator.runner import Command, CommandResult
+from mutator.runner import RUN_MARKER, Command, CommandResult
 from mutator.sites import apply_site
 
 # Build output and the worker tree itself must not be shared. A link to
@@ -60,12 +60,6 @@ def worker_count(site_count: int, requested: int | None) -> int:
     processors = os.cpu_count() or 1
     limit = processors if requested is None else requested
     return max(1, min(site_count, processors, limit))
-
-
-# new_run_dir writes this file into every run folder. A worker's real path keeps
-# the run folder as a parent even when target or target/mutation-workers is a
-# symlink to storage elsewhere, where neither name is left in the path.
-RUN_MARKER = ".mutator-run"
 
 
 def new_run_dir(root: Path) -> Path:
@@ -113,21 +107,30 @@ def delete_tree(path: Path) -> None:
     path.unlink()
 
 
-# Dependencies are read, not written, so every worker shares the project's.
-SHARED = "node_modules"
+# A nested .git can name the project's repository, so no worker gets one.
+VCS = frozenset({".git", ".hg", ".svn"})
+# Dependencies and build output, below the root, are shared as main shared them:
+# copying a nested .venv or target into every worker has no bound.
+SHARED = (SKIP_LINK - VCS) | {"node_modules"}
 
 
 def _copy_entry(destination: Path, source: Path) -> None:
     """Copy `source`, so a test that writes to it writes only in the worker (issue #8).
 
-    A project's own symlinks and node_modules stay links. A FIFO, socket, or
-    device is left out: reading one to copy it could block.
+    Version control folders are left out. A project's own symlinks and the
+    SHARED folders stay links. A folder that holds mutator's workers stays
+    empty, or a worker would copy itself. A FIFO, socket, or device is left
+    out: reading one to copy it could block.
     """
 
-    if source.is_symlink() or source.name == SHARED:
+    if source.name in VCS:
+        return
+    if source.is_symlink() or source.name in SHARED:
         symlink(destination, source)
     elif source.is_dir():
         destination.mkdir()
+        if _holds_workers(source):
+            return
         for child in source.iterdir():
             _copy_entry(destination / child.name, child)
     elif source.is_file():
@@ -155,6 +158,8 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
     for index in range(len(segments)):
         rel_dir = Path(*segments[:index])
         _copy_children(worker / rel_dir, root / rel_dir)
+    # A new file, as the copy keeps a read-only source's mode.
+    (worker / relative).unlink()
     (worker / relative).write_bytes(original)
 
 

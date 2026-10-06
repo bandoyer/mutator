@@ -6,7 +6,9 @@ alone when no input can tell the operators apart.
 """
 
 import hashlib
+import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import mutator.crapper_link
 from mutator.cli import (
     HELP,
     GitStatusError,
@@ -982,3 +985,20 @@ def test_snapshots_keep_other_files_empty_directories_and_odd_records(tmp_path):
     assert not (base / "empty").exists()
     assert (full / "keep.edn").is_file()
     _remove_empty_dirs(tmp_path / "missing-metrics")
+
+
+@pytest.mark.parametrize("sibling", [True, False], ids=["crapper-beside-the-checkout", "no-crapper"])
+def test_a_worker_copy_of_mutator_looks_for_crapper_beside_the_checkout(tmp_path, sibling):
+    # A mutation worker copies the checkout into its own target folder (issue #8).
+    if sibling:
+        (tmp_path / "crapper" / "src" / "crapper").mkdir(parents=True)
+    worker = tmp_path / "mutator" / "target" / "mutation-workers" / "run-1" / "worker-0"
+    copy = worker / "src" / "mutator" / "crapper_link.py"
+    copy.parent.mkdir(parents=True)
+    shutil.copy(mutator.crapper_link.__file__, copy)
+    spec = importlib.util.spec_from_file_location("worker_crapper_link", copy)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    found = tmp_path if sibling else worker.parent
+    assert module._sibling_src() == (found / "crapper" / "src").resolve()

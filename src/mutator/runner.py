@@ -40,8 +40,14 @@ class CommandResult:
     output: str
 
 
+# new_run_dir writes this file into every run folder. A worker's real path keeps
+# the run folder as a parent even when target or target/mutation-workers is a
+# symlink to storage elsewhere, where neither name is left in the path.
+RUN_MARKER = ".mutator-run"
+
+
 def _worker_home(cwd: Path) -> Path | None:
-    """The overlay root when cwd is inside target/mutation-workers."""
+    """The worker folder when cwd is inside one, found by its run folder's name or marker."""
 
     for candidate in [cwd, *cwd.parents]:
         parent = candidate.parent
@@ -49,7 +55,7 @@ def _worker_home(cwd: Path) -> Path | None:
             continue
         if not parent.name.startswith("run-"):
             continue
-        if parent.parent.name == "mutation-workers":
+        if parent.parent.name == "mutation-workers" or (parent / RUN_MARKER).is_file():
             return candidate
     return None
 

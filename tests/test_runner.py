@@ -178,13 +178,19 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     assert result.output.strip() == "worker"
 
 
-@pytest.mark.parametrize("named", [False, True], ids=["found-by-walking-up", "named-by-GIT_DIR"])
-def test_git_in_a_worker_cannot_reach_the_project_repository(tmp_path, monkeypatch, named):
+@pytest.mark.parametrize(
+    "named, run",
+    [(False, "target/mutation-workers/run-1"), (True, "target/mutation-workers/run-1"), (False, ".metrics/run-1")],
+    ids=["found-by-walking-up", "named-by-GIT_DIR", "storage-redirected-into-the-project"],
+)
+def test_git_in_a_worker_cannot_reach_the_project_repository(tmp_path, monkeypatch, named, run):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     if named:
         monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
-    worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
+    worker = tmp_path / run / "worker-0"
     worker.mkdir(parents=True)
+    # new_run_dir marks every run folder, so a redirected one is still known.
+    (worker.parent / ".mutator-run").touch()
     result = CommandRunner().run("git rev-parse --git-dir", worker, 5)
     assert result.code != 0
     assert "not a git repository" in result.output
