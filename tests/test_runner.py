@@ -551,6 +551,21 @@ def test_the_output_and_the_exit_code_wait_for_each_other(tmp_path):
     assert (closed.code, closed.output) == (3, "early\n")
 
 
+@pytest.mark.parametrize(
+    ("command", "timeout", "output"),
+    [
+        (r"printf 'bad \377 byte\n'; exit 1", 5, "bad � byte\n"),
+        (r"printf 'cut \303'", 5, "cut �"),
+        (r"printf 'slow \377\n'; sleep 30", 0.3, "slow �\n"),
+        (r"printf '\177\200'", 5, "\x7f�"),
+    ],
+    ids=["mid-line", "cut-off-at-the-end", "timed-out", "first-byte-past-ascii"],
+)
+def test_output_the_locale_cannot_decode_keeps_the_rest_readable(tmp_path, command, timeout, output):
+    # Issue #47: a byte that isn't valid in the locale's encoding crashed the run.
+    assert CommandRunner().run(command, tmp_path, timeout).output == output
+
+
 def test_a_wait_with_no_time_left_times_out_without_reading(monkeypatch):
     process = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True, text=True)
     command = _Command(process)
