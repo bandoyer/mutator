@@ -219,6 +219,31 @@ def test_workers_copy_the_project_and_link_only_shared_folders(tmp_path):
     assert not base.exists()
 
 
+@pytest.mark.parametrize("relative", ["src/demo.py", "demo.py", "src/pkg/demo.py"])
+def test_a_worker_gets_no_pycache_of_the_project(tmp_path, relative):
+    # Issue #82: a worker that saw the project's bytecode could run the original in place of a mutant.
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("x = 1\n", encoding="utf-8")
+    caches = ["__pycache__", "src/__pycache__", "src/pkg/__pycache__", "tests/__pycache__"]
+    for cache in caches:
+        (tmp_path / cache).mkdir(parents=True, exist_ok=True)
+        (tmp_path / cache / "demo.cpython-314.pyc").write_bytes(b"pyc")
+    (tmp_path / "tests" / "test_demo.py").write_text("y = 2\n", encoding="utf-8")
+
+    base = new_run_dir(tmp_path)
+    try:
+        worker = create_workers(base, tmp_path, relative, source.read_bytes(), 1)[0]
+        assert (worker / relative).read_text(encoding="utf-8") == "x = 1\n"
+        assert (worker / "tests" / "test_demo.py").is_file()
+        for cache in caches:
+            assert not (worker / cache).exists() and not (worker / cache).is_symlink(), cache
+    finally:
+        delete_tree(base)
+    for cache in caches:
+        assert (tmp_path / cache / "demo.cpython-314.pyc").read_bytes() == b"pyc"
+
+
 @pytest.mark.parametrize("relative", ["node_modules/dep/demo.py", "build/gen/demo.py"])
 def test_a_source_under_a_linked_or_skipped_folder_gets_real_folders_in_the_worker(tmp_path, relative):
     source = tmp_path / relative

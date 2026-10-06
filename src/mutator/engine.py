@@ -45,16 +45,6 @@ def check_backups(root: Path) -> list[tuple[Path, Path]]:
     return differing
 
 
-def _drop_bytecode(path: Path) -> None:
-    """A same-second .pyc would hide the mutant from Python."""
-
-    cache = path.parent / "__pycache__"
-    if not cache.is_dir():
-        return
-    for item in cache.glob(path.stem + ".*.pyc"):
-        item.unlink(missing_ok=True)
-
-
 def _backup(root: Path, path: Path, original: bytes) -> Path:
     relative = path.resolve().relative_to(root.resolve())
     backup = root / "target" / "mutator-backup" / relative

@@ -116,6 +116,17 @@ def worker_temp_link(worker: Path) -> Path:
     return worker.parent / f"tmp-{worker.name}"
 
 
+def _keep_bytecode_beside_sources(cwd: Path, environment: dict) -> None:
+    """A worker's commands keep any bytecode beside the worker's sources (issue #82).
+
+    With PYTHONPYCACHEPREFIX, Python would read and write a mutant's .pyc in
+    a mirror folder, where mutator can't drop it before the next mutant runs.
+    """
+
+    if _worker_home(cwd) is not None:
+        environment.pop("PYTHONPYCACHEPREFIX", None)
+
+
 def _use_worker_temp(cwd: Path, environment: dict) -> None:
     """Give a worker's commands the worker's own temp folder (issue #54).
 
@@ -348,6 +359,7 @@ class CommandRunner:
         _prefer_worker_sources(cwd, environment)
         _keep_git_in_worker(cwd, environment)
         _use_worker_temp(cwd, environment)
+        _keep_bytecode_beside_sources(cwd, environment)
         limited = _limited(command, self.memory_limit)
         try:
             process = subprocess.Popen(

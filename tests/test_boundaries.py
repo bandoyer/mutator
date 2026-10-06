@@ -6,6 +6,7 @@ alone when no input can tell the operators apart.
 """
 
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -34,11 +35,11 @@ from mutator.engine import (
     _backup,
     _carry_forward,
     _covered,
-    _drop_bytecode,
     _forms,
     mutate_file,
     scan_file,
 )
+from mutator.workers import _drop_bytecode
 from mutator.functions import (
     _mutation_field,
     _owner,
@@ -671,6 +672,52 @@ def test_backup_and_bytecode_helpers(tmp_path):
     compiled.write_bytes(b"pyc")
     _drop_bytecode(path)
     assert not compiled.exists()
+
+
+
+def test_a_pyc_already_gone_when_mutator_drops_it_is_not_an_error(tmp_path, monkeypatch):
+    # Issue #82: a process the tests left behind can remove the .pyc between its listing and its removal.
+    path = tmp_path / "src" / "demo.py"
+    cache = path.parent / "__pycache__"
+    cache.mkdir(parents=True)
+    pyc = cache / "demo.cpython-314.pyc"
+    pyc.write_bytes(b"pyc")
+    listing = os.scandir
+
+    class Vanishing:
+        """Lists each entry, then removes its file before the caller can."""
+
+        def __init__(self, folder):
+            self.entries = listing(folder)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.entries.close()
+
+        def __iter__(self):
+            for entry in self.entries:
+                os.unlink(entry.path)
+                yield entry
+
+    monkeypatch.setattr(os, "scandir", Vanishing)
+    _drop_bytecode(path)
+    assert not pyc.exists()
+
+
+def test_dropping_bytecode_matches_the_file_name_literally(tmp_path):
+    # Review of #82: a name such as demo[1] is no glob pattern, and only its own .pyc files go.
+    path = tmp_path / "src" / "demo[1].py"
+    cache = path.parent / "__pycache__"
+    cache.mkdir(parents=True)
+    own = ["demo[1].cpython-314.pyc", "demo[1].cpython-313.opt-1.pyc"]
+    kept = ["demo1.cpython-314.pyc", "other.cpython-314.pyc", "demo[1].cpython-314.txt"]
+    for name in own + kept:
+        (cache / name).write_bytes(b"pyc")
+    _drop_bytecode(path)
+    assert sorted(item.name for item in cache.iterdir()) == sorted(kept)
+    _drop_bytecode(tmp_path / "elsewhere" / "demo.py")
 
 
 @pytest.mark.parametrize(("body", "stopped"), [("return x", ""), ("return 1", "so none of its 1 sites ran")])

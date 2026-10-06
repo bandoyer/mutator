@@ -133,7 +133,9 @@ Selected mutants of one file run at the same time, one worker per core unless
 --max-workers says otherwise. A worker is a copy of the project under
 target/mutation-workers, so tests write only to their worker's copy. Only
 node_modules, nested build and cache folders, and the project's own symlinks
-are links. Git in a worker finds no repository. Before a non-scan run, a copy
+are links. __pycache__ is left out, a mutated file's .pyc is removed before
+its mutant runs, and PYTHONPYCACHEPREFIX is unset in a worker, so each mutant
+runs its own source, never a cached .pyc. Git in a worker finds no repository. Before a non-scan run, a copy
 an interrupted older run left under target/mutator-backup/ is deleted when it
 equals its source.
 When it differs, mutator stops with exit 1 and changes neither file.
