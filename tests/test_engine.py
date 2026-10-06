@@ -502,3 +502,31 @@ def test_a_listed_symlink_counts_by_its_target_name(tmp_path):
     (tmp_path / "gone").unlink()
     (tmp_path / "gone").symlink_to("elsewhere")
     assert project_files_digest(tmp_path) not in (None, linked)
+
+
+def test_a_listed_file_counts_by_its_execute_bit_too(tmp_path):
+    # Git records 100755 apart from 100644, and a runner can pick tests by it.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    script = tmp_path / "tests" / "check_f"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    runnable = project_files_digest(tmp_path)
+    script.chmod(0o644)
+    assert project_files_digest(tmp_path) not in (None, runnable)
+    script.chmod(0o755)
+    assert project_files_digest(tmp_path) == runnable
+
+
+def test_a_listed_path_that_is_no_regular_file_keeps_nothing_and_does_not_block(tmp_path):
+    # Opening a FIFO waits for a writer, so it must not be opened.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "data").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "data"], cwd=tmp_path, check=True)
+    (tmp_path / "data").unlink()
+    os.mkfifo(tmp_path / "data")
+    done = []
+    worker = threading.Thread(target=lambda: done.append(project_files_digest(tmp_path)), daemon=True)
+    worker.start()
+    worker.join(5)
+    assert done == [None]

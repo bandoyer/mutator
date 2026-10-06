@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -75,9 +76,10 @@ def project_files_digest(root: Path) -> str | None:
     """A digest of every file git lists under `root`, tracked or untracked but not ignored.
 
     mutator's own output is left out. A listed file that is gone counts as
-    missing. A symlink counts by its target's name, as git stores it. None
-    when git can't list the files, or a listed path can't be read, such as a
-    submodule: then no kill can be kept.
+    missing. A symlink counts by its target's name and a file by its bytes
+    and execute bit, as git stores them. None when git can't list the files,
+    or a listed path can't be read or is no file, such as a submodule: then
+    no kill can be kept.
     """
 
     try:
@@ -97,20 +99,31 @@ def project_files_digest(root: Path) -> str | None:
             continue
         path = root / relative
         try:
-            content = _listed_content(path)
+            content = _listed_identity(path)
         except OSError:
             return None
         digest.update(name + b"\0" + content)
     return digest.hexdigest()
 
 
-def _listed_content(path: Path) -> bytes:
+def _listed_identity(path: Path) -> bytes:
+    """What git records for a listed path: a symlink's target name, or a file's bytes and execute bit.
+
+    A path that is neither, such as a folder or a FIFO, raises OSError
+    without being opened: opening a FIFO waits for a writer.
+    """
+
     if path.is_symlink():
         return b"link:" + os.fsencode(os.readlink(path))
-    if not path.exists():
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
         return b"missing"
+    if not stat.S_ISREG(mode):
+        raise OSError(f"{path} is not a regular file")
     with open(path, "rb") as stream:
-        return hashlib.file_digest(stream, "sha256").digest()
+        content = hashlib.file_digest(stream, "sha256").digest()
+    return content + (b"x" if mode & stat.S_IXUSR else b"-")
 
 
 def _test_context(files_digest: str | None, command: Command, cwd: Path, timeout_factor: float) -> str | None:
