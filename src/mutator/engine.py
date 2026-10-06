@@ -75,8 +75,9 @@ def project_files_digest(root: Path) -> str | None:
     """A digest of every file git lists under `root`, tracked or untracked but not ignored.
 
     mutator's own output is left out. A listed file that is gone counts as
-    missing. None when git can't list the files, or a listed path can't be
-    read, such as a submodule: then no kill can be kept.
+    missing. A symlink counts by its target's name, as git stores it. None
+    when git can't list the files, or a listed path can't be read, such as a
+    submodule: then no kill can be kept.
     """
 
     try:
@@ -95,15 +96,21 @@ def project_files_digest(root: Path) -> str | None:
         if relative.startswith(_OWN_OUTPUT):
             continue
         path = root / relative
-        content = b"missing"
-        if os.path.lexists(path):
-            try:
-                with open(path, "rb") as stream:
-                    content = hashlib.file_digest(stream, "sha256").digest()
-            except OSError:
-                return None
+        try:
+            content = _listed_content(path)
+        except OSError:
+            return None
         digest.update(name + b"\0" + content)
     return digest.hexdigest()
+
+
+def _listed_content(path: Path) -> bytes:
+    if path.is_symlink():
+        return b"link:" + os.fsencode(os.readlink(path))
+    if not path.exists():
+        return b"missing"
+    with open(path, "rb") as stream:
+        return hashlib.file_digest(stream, "sha256").digest()
 
 
 def _test_context(files_digest: str | None, command: Command, cwd: Path, timeout_factor: float) -> str | None:

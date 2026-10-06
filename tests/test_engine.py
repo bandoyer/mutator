@@ -486,3 +486,19 @@ def test_the_project_digest_of_a_subfolder_covers_only_that_folder(tmp_path):
     assert project_files_digest(app) == before
     (app / "test_demo.py").write_text("", encoding="utf-8")
     assert project_files_digest(app) != before
+
+
+def test_a_listed_symlink_counts_by_its_target_name(tmp_path):
+    # bujo tracks .claude/skills/verify-bujo, a symlink to a folder.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "skills" / "verify").mkdir(parents=True)
+    (tmp_path / "skills" / "verify" / "SKILL.md").write_text("a", encoding="utf-8")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "verify").symlink_to("../skills/verify")
+    (tmp_path / "gone").symlink_to("nowhere")
+    linked = project_files_digest(tmp_path)
+    assert linked is not None
+    assert project_files_digest(tmp_path) == linked
+    (tmp_path / "gone").unlink()
+    (tmp_path / "gone").symlink_to("elsewhere")
+    assert project_files_digest(tmp_path) not in (None, linked)
