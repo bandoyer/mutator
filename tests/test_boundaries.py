@@ -679,26 +679,26 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
     }
     monkeypatch.setattr("mutator.engine.form_spans", lambda *args: spans)
     monkeypatch.setattr("mutator.engine.form_digests", lambda *args: {key: "d" for key in spans})
-    ordered = _forms("x", path, tmp_path, "src/demo.py", [], {}, {}, None)
+    ordered = _forms("x", path, tmp_path, "src/demo.py", [], {}, {}, None, None)
     assert [form.name for form in ordered] == ["long", "short"]
 
     owned = _site(namespace="demo", form_id="defn/place", mutation_id="m", line=2)
     place_span = {("demo", "defn/place"): (1, 3, "place", False)}
     monkeypatch.setattr("mutator.engine.form_spans", lambda *args: place_span)
     monkeypatch.setattr("mutator.engine.form_digests", lambda *args: {("demo", "defn/place"): "d"})
-    counted = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {"m": "survived"}, {2})
+    counted = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {"m": "survived"}, {2}, None)
     assert counted[0].survived == 1
     assert counted[0].killed == 0
-    missing = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {}, None)
+    missing = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {}, None, None)
     assert missing[0].survived == 1
 
     history = History(
-        forms={("demo", "defn/place"): PriorForm("demo", "defn/place", "old", "src/demo.py")},
+        forms={("demo", "defn/place"): PriorForm("demo", "defn/place", "old", "src/demo.py", "c")},
         outcomes={"missing": "killed", "m": "killed"},
     )
-    carried = _carry_forward([owned], {"m": True}, history, {("demo", "defn/place"): "new"})
+    carried = _carry_forward([owned], {"m": True}, history, {("demo", "defn/place"): "new"}, "c")
     assert carried == {}
-    uncovered = _carry_forward([owned], {"m": False}, history, {("demo", "defn/place"): "old"})
+    uncovered = _carry_forward([owned], {"m": False}, history, {("demo", "defn/place"): "old"}, "c")
     assert uncovered == {}
 
     warned = mutate_file(

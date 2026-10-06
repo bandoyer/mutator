@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +19,9 @@ from mutator.workers import WorkerFailed, run_mutants
 # The unmutated runs can't use the mutant timeout: the baseline sets it, and a
 # worker's control run is a cold build that can be much slower than the baseline.
 BASELINE_TIMEOUT = 600.0
+
+# mutator's own output, which changes on every run and is no test input.
+_OWN_OUTPUT = (".metrics/", "target/mutation-workers/", "target/mutator-backup/")
 
 
 def check_backups(root: Path) -> list[tuple[Path, Path]]:
@@ -65,6 +71,56 @@ def _covered(site: Site, lines: set[int] | None, ignore_coverage: bool) -> bool:
     return site.line in lines
 
 
+def project_files_digest(root: Path) -> str | None:
+    """A digest of every file git lists under `root`, tracked or untracked but not ignored.
+
+    mutator's own output is left out. A listed file that is gone counts as
+    missing. None when git can't list the files, or a listed path can't be
+    read, such as a submodule: then no kill can be kept.
+    """
+
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if listed.returncode != 0:
+        return None
+    digest = hashlib.sha256()
+    for name in sorted(set(listed.stdout.split(b"\0")) - {b""}):
+        relative = os.fsdecode(name)
+        if relative.startswith(_OWN_OUTPUT):
+            continue
+        path = root / relative
+        content = b"missing"
+        if os.path.lexists(path):
+            try:
+                content = hashlib.sha256(path.read_bytes()).digest()
+            except OSError:
+                return None
+        digest.update(name + b"\0" + content)
+    return digest.hexdigest()
+
+
+def _test_context(files_digest: str | None, command: Command, cwd: Path, timeout_factor: float) -> str | None:
+    """What a kill depends on besides its own function. None when it can't be known."""
+
+    if files_digest is None:
+        return None
+    identity = repr((files_digest, _command_key(command), str(cwd), timeout_factor))
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _unchanged(history, key: tuple[str, str], digests, context: str | None) -> bool:
+    prior = history.forms.get(key)
+    if prior is None or context is None:
+        return False
+    return prior.digest == digests.get(key) and prior.context == context
+
+
 def _select(
     sites: list[Site],
     covered: dict[str, bool],
@@ -72,6 +128,7 @@ def _select(
     digests: dict[tuple[str, str], str],
     mutate_all: bool,
     lines: set[int] | None,
+    context: str | None,
 ) -> list[Site]:
     chosen = []
     for site in sites:
@@ -79,9 +136,7 @@ def _select(
             continue
         if lines is not None and site.line not in lines:
             continue
-        key = (site.namespace, site.form_id)
-        prior = history.forms.get(key)
-        unchanged = prior is not None and prior.digest == digests.get(key)
+        unchanged = _unchanged(history, (site.namespace, site.form_id), digests, context)
         if mutate_all or not unchanged:
             chosen.append(site)
             continue
@@ -91,16 +146,16 @@ def _select(
     return chosen
 
 
-def _carry_forward(sites: list[Site], covered: dict[str, bool], history, digests) -> dict[str, str]:
+def _carry_forward(
+    sites: list[Site], covered: dict[str, bool], history, digests, context: str | None
+) -> dict[str, str]:
     by_id = {site.mutation_id: site for site in sites}
     carried = {}
     for mutation, status in history.outcomes.items():
         site = by_id.get(mutation)
         if site is None or not covered[site.mutation_id]:
             continue
-        key = (site.namespace, site.form_id)
-        prior = history.forms.get(key)
-        if prior is not None and prior.digest == digests.get(key):
+        if _unchanged(history, (site.namespace, site.form_id), digests, context):
             carried[mutation] = status
     return carried
 
@@ -114,6 +169,7 @@ def _forms(
     covered: dict[str, bool],
     outcomes: dict[str, str],
     lines: set[int] | None,
+    context: str | None,
 ) -> list[FormResult]:
     spans = form_spans(source, path, root)
     digests = form_digests(source, path, root)
@@ -150,6 +206,7 @@ def _forms(
                 survived=survived,
                 uncovered=uncovered,
                 sites=len(owned),
+                context=context,
             )
         )
     return forms
@@ -225,8 +282,8 @@ def _apply_selected(
     original,
     selected,
     runner,
-    language,
-    test_command,
+    command,
+    cwd,
     timeout_factor,
     file_key,
     baselines,
@@ -234,15 +291,17 @@ def _apply_selected(
     max_workers,
     baseline_timeout,
 ) -> RunResult | None:
-    if not selected:
+    # A kept kill is reported only after the tests pass on the code as it is now.
+    if not selected and not outcomes:
         return None
-    command, cwd = test_plan(root, path, language, test_command)
     cache_key = (_command_key(command), str(cwd))
     _remember_baseline(baselines, cache_key, runner, command, cwd, baseline_timeout)
     baseline = baselines[cache_key]
     if baseline.code != 0:
         failed = f"Baseline {_how(baseline, baseline_timeout)}"
         return _baseline_failure(file_key, command, _tail(baseline.output), failed)
+    if not selected:
+        return None
     seconds = baseline.seconds
     timeout = max(2.0, seconds * timeout_factor)
     if runner.verbose:
@@ -294,8 +353,13 @@ def mutate_file(
     baselines: dict[tuple[tuple[str, ...], str], CommandResult],
     max_workers: int | None = None,
     baseline_timeout: float = BASELINE_TIMEOUT,
+    files_digest: str | None = None,
 ) -> RunResult:
-    """Mutate one file and write its namespaces into `.metrics/mutate`."""
+    """Mutate one file and write its namespaces into `.metrics/mutate`.
+
+    `files_digest` is `project_files_digest(root)`, taken once per run. A kill
+    from the snapshot is kept only when it and the test command are unchanged.
+    """
 
     root = root.resolve()
     path = path.resolve()
@@ -313,8 +377,10 @@ def mutate_file(
     _warn_uncovered(file_key, found, covered_lines, ignore_coverage)
     history = load_history(root, file_key)
     digests = form_digests(source, path, root)
-    selected = _select(found, covered, history, digests, mutate_all, lines)
-    outcomes = _carry_forward(found, covered, history, digests)
+    command, cwd = test_plan(root, path, language, test_command)
+    context = _test_context(files_digest, command, cwd, timeout_factor)
+    selected = _select(found, covered, history, digests, mutate_all, lines, context)
+    outcomes = _carry_forward(found, covered, history, digests, context)
     _warn_many(file_key, selected, mutation_warning)
     failure = _apply_selected(
         path,
@@ -322,8 +388,8 @@ def mutate_file(
         original,
         selected,
         runner,
-        language,
-        test_command,
+        command,
+        cwd,
         timeout_factor,
         file_key,
         baselines,
@@ -333,7 +399,7 @@ def mutate_file(
     )
     if failure is not None:
         return failure
-    forms = _forms(source, path, root, file_key, found, covered, outcomes, lines)
+    forms = _forms(source, path, root, file_key, found, covered, outcomes, lines, context)
     written = write_results(root, file_key, forms, outcomes)
     return RunResult(
         path=file_key,

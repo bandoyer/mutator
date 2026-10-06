@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from conftest import wait_until
 
-from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file
+from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult, CommandRunner
@@ -43,6 +43,8 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
     path.parent.mkdir()
     path.write_text(SOURCE, encoding="utf-8")
     original = path.read_bytes()
+    # A kill is kept only while the files git lists are unchanged.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     runner = FakeRunner()
     first = mutate_file(
         path,
@@ -56,6 +58,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         timeout_factor=10,
         mutation_warning=50,
         baselines={},
+        files_digest=project_files_digest(tmp_path),
     )
     assert path.read_bytes() == original
     assert first.baseline_failed is False
@@ -88,6 +91,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         mutation_warning=50,
         baselines={},
         max_workers=1,
+        files_digest=project_files_digest(tmp_path),
     )
     assert second.forms[0].killed == 1
     assert second.forms[0].survived == 3
@@ -439,3 +443,21 @@ def test_ctrl_c_while_the_workers_start_still_stops_them(tmp_path, monkeypatch):
     assert time.time() - started.stat().st_mtime < 2.0
     wait_until(started, 2.5)
     assert not late.exists()
+
+
+def test_the_project_digest_is_none_when_a_listed_path_cannot_be_read(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    readable = project_files_digest(tmp_path)
+    assert readable is not None
+    (tmp_path / ".metrics" / "mutate").mkdir(parents=True)
+    (tmp_path / ".metrics" / "mutate" / "demo.edn").write_text("{}", encoding="utf-8")
+    assert project_files_digest(tmp_path) == readable
+    secret = tmp_path / "secret.txt"
+    secret.write_text("x", encoding="utf-8")
+    secret.chmod(0)
+    try:
+        assert project_files_digest(tmp_path) is None
+    finally:
+        secret.chmod(0o600)
+    assert project_files_digest(tmp_path / "missing") is None

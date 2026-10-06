@@ -44,6 +44,7 @@ class FormResult:
     survived: int = 0
     uncovered: int = 0
     sites: int = 0
+    context: str | None = None
 
     @property
     def score(self) -> float | None:
@@ -59,6 +60,7 @@ class PriorForm:
     id: str
     digest: str
     file: str
+    context: str | None = None
 
 
 @dataclass
