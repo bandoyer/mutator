@@ -1,3 +1,4 @@
+import collections
 import re
 import shlex
 import signal
@@ -805,3 +806,167 @@ def test_a_site_on_a_later_line_of_a_covered_python_statement_runs(tmp_path, cap
     for line, mark in re.findall(r"^. src/demo.py:(\d+) .*?( uncovered)?  \[", capsys.readouterr().out, re.M):
         got["uncovered" if mark else "run"].add(int(line))
     assert got == want
+
+
+_TS_CLOCK = "export function tick(): boolean { return 1 === 1 }\n"
+_CLJ_CORE = "(ns demo.core)\n(defn tick [] (= 1 1))\n"
+# Per language: the project's files, the source to mutate, the report its tool writes, and the report's text.
+_FAILED_RUNS = {
+    "python": (
+        {"pyproject.toml": _PY_TOML, "src/demo.py": _PY_DEMO},
+        "src/demo.py",
+        "target/coverage/python/lcov.info",
+        _PY_FRESH,
+    ),
+    "go": (
+        {"go.mod": "module {root}\n", "clock.go": _GO_CLOCK},
+        "clock.go",
+        "target/coverage/go/coverage.out",
+        "mode: set\n{root}/clock.go:3.17,5.2 1 1\n{root}/clock.go:7.17,9.2 1 0\n",
+    ),
+    "java": (
+        {"pom.xml": "<project/>\n", "src/main/java/demo/Clock.java": _JAVA_CLOCK},
+        "src/main/java/demo/Clock.java",
+        "target/site/jacoco/jacoco.xml",
+        _JACOCO,
+    ),
+    "typescript": (
+        {"package.json": '{"scripts": {"coverage": "sh coverage.sh"}}\n', "src/clock.ts": _TS_CLOCK},
+        "src/clock.ts",
+        "coverage/lcov.info",
+        "SF:src/clock.ts\nDA:1,1\nend_of_record\n",
+    ),
+    "rust": (
+        {"Cargo.toml": "[package]\nname = 'clock'\n", "src/lib.rs": _RS_LIB},
+        "src/lib.rs",
+        "target/coverage/rust/lcov.info",
+        "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nend_of_record\n",
+    ),
+    "clojure": (
+        {"deps.edn": "{}\n", "src/demo/core.clj": _CLJ_CORE},
+        "src/demo/core.clj",
+        "target/coverage/lcov.info",
+        "SF:src/demo/core.clj\nDA:2,1\nend_of_record\n",
+    ),
+}
+
+
+def _tools_that_exit(root: Path, text: str, codes: dict[str, int]):
+    """Each coverage tool writes `text` where its command line says, then exits with `codes[<module>]`
+    (0 for a module not named). coverage.py's `run` step exits with that status and its `lcov` step
+    with 0, as when the tests fail under coverage. Probes such as `python -c "import coverage"` exit 0.
+    """
+
+    def shell(command, cwd):
+        cwd = Path(cwd)
+        relative = cwd.resolve().relative_to(root.resolve()).as_posix()
+        code = codes.get(relative, 0)
+        if command[1:4] == ["-m", "coverage", "run"]:
+            Path(command[4].split("=", 1)[1]).touch()
+            return code
+        if command[1:4] == ["-m", "coverage", "lcov"]:
+            report, code = Path(command[-1]), 0
+        elif command[:2] == ["go", "test"]:
+            report = Path(command[-1].split("=", 1)[1])
+        elif command[0] == "mvn":
+            report = cwd / "target" / "site" / "jacoco" / "jacoco.xml"
+        elif command[:2] == ["cargo", "llvm-cov"]:
+            report = Path(command[command.index("--output-path") + 1])
+        elif command[:3] == ["npm", "run", "coverage"]:
+            report = cwd / "coverage" / "lcov.info"
+        elif command[0] == "clj":
+            report = cwd / "target" / "coverage" / "lcov.info"
+        else:
+            return 0
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(text.replace("{root}", root.name), encoding="utf-8")
+        return code
+
+    return shell
+
+
+def _failed_run_project(tmp_path, monkeypatch, language: str, codes: dict[str, int]) -> tuple[str, Path]:
+    files, source, report, text = _FAILED_RUNS[language]
+    for relative, body in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body.replace("{root}", tmp_path.name), encoding="utf-8")
+    runners = ensure_crapper().runners
+    monkeypatch.setattr(runners, "run_shell", _tools_that_exit(tmp_path, text, codes))
+    monkeypatch.setattr(runners.shutil, "which", lambda name: "/bin/cargo-llvm-cov" if name == "cargo-llvm-cov" else None)
+    return source, tmp_path.resolve() / report
+
+
+def _mutate(tmp_path, *sources: str) -> int:
+    return run(["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true", *sources])
+
+
+_SITE = re.compile(r"^(KILLED|SURVIVED|UNCOVERED|TIMEOUT) ", re.M)
+
+
+@pytest.mark.parametrize("language", list(_FAILED_RUNS))
+def test_a_failed_coverage_run_that_wrote_a_report_stops_before_any_mutant_runs(tmp_path, monkeypatch, capsys, language):
+    # Issue #66: a coverage run can fail and still write a report (crapper#55). Sites that
+    # only the failed run would reach would read as UNCOVERED, so no mutant runs.
+    source, report = _failed_run_project(tmp_path, monkeypatch, language, {".": 1})
+    code = _mutate(tmp_path, source)
+    captured = capsys.readouterr()
+    assert code == 2
+    assert not _SITE.search(captured.out)
+    assert not (tmp_path / ".metrics" / "mutate").exists()
+    assert f"Coverage report from a failed run: {report} (exited 1 in {tmp_path.resolve()}).\n" in captured.err
+    assert "No mutant ran:" in captured.err and "--no-coverage" in captured.err
+
+
+@pytest.mark.parametrize("language", list(_FAILED_RUNS))
+def test_a_coverage_run_that_succeeded_is_scored(tmp_path, monkeypatch, capsys, language):
+    source, _report = _failed_run_project(tmp_path, monkeypatch, language, {})
+    code = _mutate(tmp_path, source)
+    captured = capsys.readouterr()
+    assert code == 3
+    assert f"SURVIVED  {source}:" in captured.out
+    assert "from a failed run" not in captured.err
+
+
+@pytest.mark.parametrize("status", [1, 255, -9])
+def test_any_non_zero_coverage_status_stops_the_run(tmp_path, monkeypatch, capsys, status):
+    """From 1 up, or a negative status from a signal, as the run gave it."""
+
+    source, report = _failed_run_project(tmp_path, monkeypatch, "go", {".": status})
+    assert _mutate(tmp_path, source) == 2
+    assert f"{report} (exited {status} in " in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failing", [["two"], ["one", "two"]])
+def test_one_failed_package_stops_the_whole_run(tmp_path, monkeypatch, capsys, failing):
+    # Like a failed --coverage-command, a failed run stops every file, not only its own package's.
+    for package in ("one", "two"):
+        (tmp_path / package / "src").mkdir(parents=True)
+        (tmp_path / package / "pyproject.toml").write_text(_PY_TOML, encoding="utf-8")
+        (tmp_path / package / "src" / "demo.py").write_text(_PY_DEMO, encoding="utf-8")
+    text = "SF:src/demo.py\nDA:1,1\nDA:2,1\nend_of_record\n"
+    runners = ensure_crapper().runners
+    monkeypatch.setattr(runners, "run_shell", _tools_that_exit(tmp_path, text, {name: 1 for name in failing}))
+    code = _mutate(tmp_path, "one/src/demo.py", "two/src/demo.py")
+    captured = capsys.readouterr()
+    assert code == 2
+    assert not _SITE.search(captured.out)
+    named = re.findall(r"^Coverage report from a failed run: \S+/target/coverage/python/(\w+)/lcov\.info ", captured.err, re.M)
+    assert named == failing
+    assert captured.err.count("No mutant ran:") == 1
+
+
+def test_an_older_crappers_reports_have_no_status_and_are_scored(tmp_path, monkeypatch, capsys):
+    # mutator pins no crapper. Before crapper#55, a Report had only `path` and `module`.
+    old_report = collections.namedtuple("Report", ["path", "module"])
+    source, _report = _failed_run_project(tmp_path, monkeypatch, "python", {".": 1})
+    runners = ensure_crapper().runners
+    collect = runners.collect_coverage
+    monkeypatch.setattr(
+        runners, "collect_coverage", lambda root, files: [old_report(r.path, r.module) for r in collect(root, files)]
+    )
+    code = _mutate(tmp_path, source)
+    captured = capsys.readouterr()
+    assert code == 3
+    assert f"SURVIVED  {source}:2" in captured.out
+    assert "from a failed run" not in captured.err
