@@ -77,7 +77,7 @@ Preconditions:
 
   Run it from the repo root. Pass: exit code `2` within seconds, stderr says `Unmutated tests failed in a mutation worker for demo.py` and `mutator does not run in <project>/target/mutation-workers/run-<id>/worker-0: it is inside target/mutation-workers`, worker folders `(none)`, processes left `(none)`, and `ls` finds no `nested-ran`: the refused run started no command. The bug shows as a `nested-ran` file and no `does not run in` line: the inner run mutated the outer worker. In mutator's own tests, that inner run's tests start the next one (#57).
 
-  Then drive it once more with a fresh fixture whose `target` is a symlink to storage outside the project, made before the drive: `mkdir "$scripts/storage" && ln -s "$scripts/storage" "$project/target"`. The same pass holds, with the worker under `$scripts/storage/mutation-workers` in the refusal. A worker's real path then has no `target/mutation-workers` in it, and the run folder's `.mutator-run` file is what mutator recognizes.
+  Then drive it once more with a fresh fixture whose `target` is a symlink to storage outside the project, made before the drive: `mkdir "$scripts/storage" && ln -s "$scripts/storage" "$project/target"`. The same pass holds, with the worker under `$scripts/storage/mutation-workers` in the refusal, except that `processes left` can't vouch for the storage: the helper lists only processes whose working folder is under the project. Check the storage by hand: `ls -A "$scripts/storage/mutation-workers"` and `for p in /proc/[0-9]*; do readlink "$p/cwd"; done 2>/dev/null | grep -F "$scripts/storage"` both print nothing. A worker's real path then has no `target/mutation-workers` in it, and the run folder's `.mutator-run` file is what mutator recognizes.
 
 ## Gotchas
 
