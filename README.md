@@ -169,7 +169,9 @@ Existing `tool.mutmut` settings other than those two pytest argument lists
 are refused, so an incompatible setting is never silently discarded.
 
 The adapter makes a disposable copy under `target/mutation-workers` and keeps
-links into the project inside that copy. Mutmut's parallel processes share
+links into the project inside that copy. Folders that native workers share,
+including `node_modules` and nested caches and build output, are omitted.
+Mutmut's parallel processes share
 the copied filesystem, so tests must isolate their own files. The original
 source and configuration stay untouched. Process isolation and a disposable
 copy do not restrict writes through external paths or external symlinks.

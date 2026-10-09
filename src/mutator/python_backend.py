@@ -79,6 +79,11 @@ def _local_links(root: Path, worker: Path) -> None:
             if not link.is_symlink():
                 continue
             original = root / link.relative_to(worker)
+            if not original.is_symlink():
+                # Native workers share nested caches and build directories.
+                # Omit these instead of making a link point back to itself.
+                link.unlink()
+                continue
             target = original.resolve()
             if target.is_relative_to(root):
                 link.unlink()

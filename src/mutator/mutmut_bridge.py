@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import shutil
 import sys
 import tomllib
 from importlib.metadata import version
@@ -63,20 +64,26 @@ def install_import_names(api, roots):
 
 
 def preserve_links(api):
-    copy = api.copy_also_copy_files
+    from mutmut.configuration import config
+
+    copied = set()
 
     def copy_files():
-        copy()
-        for directory, names, files in os.walk(".", followlinks=False):
-            if Path(directory) == Path("."):
-                names[:] = [name for name in names if name not in {"mutants", "target", ".git"}]
-            for name in names + files:
-                source = Path(directory) / name
-                if source.is_symlink():
-                    destination = Path("mutants") / source
-                    if destination.is_file() or destination.is_symlink():
-                        destination.unlink()
-                        destination.symlink_to(os.readlink(source))
+        for source in config().also_copy:
+            source = Path(source)
+            # Generation runs once for site selection and again in api.run.
+            # Copy each tree once; copytree cannot overlay existing symlinks.
+            if source in copied:
+                continue
+            destination = Path("mutants") / source
+            if source.is_symlink():
+                destination.unlink(missing_ok=True)
+                destination.symlink_to(os.readlink(source))
+            elif source.is_dir():
+                shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
+            elif source.is_file():
+                shutil.copy2(source, destination)
+            copied.add(source)
 
     api.copy_also_copy_files = copy_files
 

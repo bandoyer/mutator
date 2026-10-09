@@ -75,6 +75,34 @@ def test_line_selection_runs_only_the_selected_mutations(python_project, capsys)
     assert "SURVIVED" not in captured.out
 
 
+def test_nested_build_directories_are_omitted_without_following_links(python_project, capsys):
+    build = python_project / "assets" / "build"
+    build.mkdir(parents=True)
+    sentinel = build / "state.txt"
+    sentinel.write_text("original build\n")
+    test = python_project / "tests" / "test_demo.py"
+    test.write_text(test.read_text() +
+                    '\ndef test_build():\n'
+                    '    assert not (Path(demo.__file__).parent.parent / "assets" / "build").exists()\n')
+    assert drive(python_project, "--lines", "2") == 0, capsys.readouterr().err
+    assert sentinel.read_text() == "original build\n"
+
+
+def test_directory_links_are_preserved_inside_mutant_copy(python_project, capsys):
+    data = python_project / "assets" / "data"
+    data.mkdir(parents=True)
+    (data / "value.txt").write_text("original data\n")
+    (python_project / "lib" / "data").symlink_to("../assets/data")
+    test = python_project / "tests" / "test_demo.py"
+    test.write_text(test.read_text() +
+                    '\ndef test_data_link():\n'
+                    '    link = Path(demo.__file__).parent / "data"\n'
+                    '    assert link.is_symlink()\n'
+                    '    assert link.resolve() == Path(demo.__file__).parent.parent / "assets" / "data"\n')
+    assert drive(python_project, "--lines", "2") == 0, capsys.readouterr().err
+    assert (python_project / "lib" / "data").readlink() == Path("../assets/data")
+
+
 def test_scan_runs_no_tests_and_writes_no_snapshot(python_project, capsys):
     (python_project / "tests" / "test_demo.py").write_text('raise RuntimeError("must not import")\n')
     code = run(["--root", str(python_project), "--python-backend", "mutmut", "--scan", "--lines", "2",
