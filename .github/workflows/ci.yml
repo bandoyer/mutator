@@ -30,8 +30,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - if: matrix.deps == 'current'
-        run: pip install -e "./mutator[dev]"
+        run: pip install -e "./mutator[dev,python]"
       - if: matrix.deps == 'minimum'
-        run: pip install uv && uv pip install --system --resolution lowest-direct -e "./mutator[dev]"
+        run: pip install uv && uv pip install --system --resolution lowest-direct -e "./mutator[dev,python]"
       - run: python -m pytest -q
         working-directory: mutator

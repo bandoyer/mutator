@@ -16,6 +16,7 @@ mutator = "mutator.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+python = ["mutmut==3.8.0", "tomli-w>=1.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
