@@ -178,8 +178,13 @@ copy do not restrict writes through external paths or external symlinks.
 
 Tests that execute the CLI through another interpreter can fail the clean
 run because the generated code imports mutmut. Calls in a subprocess also
-do not supply mutmut's in-process test associations. Use the native backend
-for such suites. The adapter stops with exit 2 and preserves prior Python
+do not supply mutmut's in-process test associations. Launching a Python file
+as a script names its module `__main__`, which does not match mutmut's mutation
+IDs for the imported module. In the subprocess trial, known mutations were
+therefore reported as survivors even after both interpreters matched.
+Use the native backend for such suites. See the
+[subprocess compatibility results](benchmarks/python-mutmut.md#subprocess-compatibility).
+The adapter stops with exit 2 and preserves prior Python
 snapshots when setup, clean tests, or result translation fails. Interrupts,
 pytest internal errors, crashes, and incomplete results do not count as kills.
 Mutant timeouts count as kills, matching the native engine.
