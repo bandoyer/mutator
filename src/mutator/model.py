@@ -23,6 +23,8 @@ class Site:
 
     @property
     def description(self) -> str:
+        if "\n" in self.original or "\n" in self.mutant:
+            return f"{self.original!r} -> {self.mutant!r}"
         if self.mutant == "":
             return f"delete {self.original}"
         return f"{self.original} -> {self.mutant}"

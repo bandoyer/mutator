@@ -39,6 +39,9 @@ Exit `0` when every executed mutant was killed. Exit `1` on a usage error, when 
 
 ## Workers
 
+The worker and cache behavior below describes the default `native` backend.
+For the optional Python backend, see [Python with mutmut](#python-with-mutmut).
+
 Mutants of one file run at the same time. The default is one worker per core. `--max-workers` sets the cap. The run uses the smaller of that cap, the number of cores, and the number of selected sites. Files are still taken one at a time.
 
 Each worker is a directory under `target/mutation-workers` that holds its own copy of the project, so a test that writes a file changes only its worker's copy. Some things are linked, not copied: `node_modules`, each symlink the project holds, and any folder below the root named like one mutator never shares, such as a nested `.venv` or `target`. A write through one of those still reaches the original ([#70](https://github.com/bandoyer/mutator/issues/70)). At the root, the folders mutator never shares, such as `.venv` and `target`, are left out. `.git`, `.hg`, and `.svn` are left out at every depth ([#8](https://github.com/bandoyer/mutator/issues/8)), and so is `__pycache__`. A worker compiles the project's Python from source. Before each mutant runs, mutator removes that file's `.pyc` from the worker, and a worker's commands get no `PYTHONPYCACHEPREFIX`, so any bytecode they write stays beside the sources, where mutator removes it. So a mutant always runs its own code, never a cached `.pyc` of the original or of another mutant, unless the test command sets its own `-X pycache_prefix`. Python can trust a stale `.pyc` when a same-size mutant is written in the same second as the source it was compiled from ([#82](https://github.com/bandoyer/mutator/issues/82)). A test that finds a checkout beside the project from its own file's path, such as `Path(__file__).resolve().parents[2].parent`, now looks beside the worker's run folder instead. Search each parent folder, as mutator does for crapper. Git run in a worker finds no repository, so a test's `git add` or `git status` can't change the project's index. A test that needs the project's git repository therefore fails its worker's unmutated run, with exit `2`. The worker is removed when that file's mutants finish.
@@ -134,3 +137,72 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest
 ```
+
+## Python with mutmut
+
+`--python-backend mutmut` selects an experimental adapter for **mutmut 3.8.0**.
+Mutmut generates the Python mutations and selects the pytest tests that call
+each mutated function. Its forked workers reuse pytest's imports. Other
+languages still use the native engine.
+
+Install the extra in mutator's environment, and install the same dependencies
+in the project's Python if it has a separate environment:
+
+```bash
+uv pip install --python .venv/bin/python -e '.[python]'
+# From the project being tested:
+uv pip install --python .venv/bin/python 'mutmut==3.8.0' 'tomli-w>=1.0'
+/path/to/mutator/mutator --python-backend mutmut --max-workers 4 src/demo.py
+```
+
+This backend is for pytest tests that import the source in the test process.
+It needs fork support and pytest configuration in `pyproject.toml`. If the
+project has a `.venv` or `venv`, that interpreter runs the backend. Otherwise
+it uses mutator's interpreter. `--test-command` accepts `python -m pytest`
+with arguments. Shell wrappers are rejected. Run mutator itself inside your
+sandbox. Use pytest's `testpaths` or mutmut's
+`pytest_add_cli_args_test_selection` to select a suite; a test path appended
+to `--test-command` also runs for every mutant and reduces test selection's
+benefit.
+
+Existing `tool.mutmut` settings other than those two pytest argument lists
+are refused, so an incompatible setting is never silently discarded.
+
+The adapter makes a disposable copy under `target/mutation-workers` and keeps
+links into the project inside that copy. Mutmut's parallel processes share
+the copied filesystem, so tests must isolate their own files. The original
+source and configuration stay untouched. Process isolation and a disposable
+copy do not restrict writes through external paths or external symlinks.
+
+Tests that execute the CLI through another interpreter can fail the clean
+run because the generated code imports mutmut. Calls in a subprocess also
+do not supply mutmut's in-process test associations. Use the native backend
+for such suites. The adapter stops with exit 2 and preserves prior Python
+snapshots when setup, clean tests, or result translation fails. Interrupts,
+pytest internal errors, crashes, and incomplete results do not count as kills.
+Mutant timeouts count as kills, matching the native engine.
+
+`--lines` selects mutation locations and `--scan` lists mutmut's sites without
+running tests or writing metrics. Functions without associated tests are
+uncovered. `--no-coverage` instead tries the full suite for those functions.
+If no association can be established for any generated function, mutmut
+refuses the run. External coverage options and `--since-last-run` require
+the native backend.
+
+Every mutmut invocation starts fresh. This first adapter does not reuse
+mutmut's cache. Its snapshot mutation IDs include the backend and pinned
+version, so native results cannot be reused as mutmut results. Mutmut's
+operators differ from the native operators; compare individual mutations
+when assessing a change in score. A line-filtered snapshot contains only
+mutmut sites generated for that selection.
+
+`--timeout-factor` applies to mutmut's estimate for the selected tests.
+For this backend, `--baseline-timeout` bounds the **entire backend command**,
+including preparation and mutants; the default is 600 seconds. Reaching it
+stops with exit 2. `--memory-limit` applies to the backend process and is
+inherited by its children.
+
+The adapter uses private mutmut generation and result APIs, isolated in
+`mutmut_bridge.py`. Other mutmut versions are refused. Upgrade the pin only
+with the integration tests and a real project trial. See
+[the initial skillflow experiment](benchmarks/python-mutmut.md).

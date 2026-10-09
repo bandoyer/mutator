@@ -93,6 +93,9 @@ Options:
   --test-command <cmd>          Run this command for the baseline and every
                                 mutant. The working directory is the project
                                 root.
+  --python-backend <name>       native (default) or mutmut. mutmut requires
+                                the python extra in the project's interpreter,
+                                uses pytest, and starts a fresh run each time.
   --timeout-factor <number>     Mutant timeout, as a multiple of the baseline
                                 duration. Default: 10. The timeout is at least
                                 2 seconds.
@@ -184,6 +187,7 @@ class Options:
     use_existing_coverage: bool = False
     coverage_command: str | None = None
     test_command: str | None = None
+    python_backend: str = "native"
     timeout_factor: float = 10.0
     baseline_timeout: float = BASELINE_TIMEOUT
     mutation_warning: int = 50
@@ -254,6 +258,12 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 continue
             if arg == "--test-command":
                 options.test_command = _take(args, index, arg)
+                index += 2
+                continue
+            if arg == "--python-backend":
+                options.python_backend = _take(args, index, arg)
+                if options.python_backend not in {"native", "mutmut"}:
+                    raise ValueError("--python-backend requires native or mutmut")
                 index += 2
                 continue
             if arg == "--timeout-factor":
@@ -696,12 +706,24 @@ def _run(argv: list[str] | None) -> int:
         return 0
     if not options.scan and _differing_backups(root):
         return 1
+    if options.python_backend == "mutmut":
+        from mutator.python_backend import run_python
+
+        python_files = [path for path in files if path.suffix == ".py"]
+        other_files = [path for path in files if path.suffix != ".py"]
+        python_code = run_python(options, root, python_files) if python_files else 0
+        if python_code not in (0, 3) or not other_files:
+            return python_code
+        files = other_files
+    else:
+        python_code = 0
     coverage, reports = _prepare_coverage(options, root, files)
     if coverage != 0:
         return coverage
     if options.scan:
         return _scan(options, root, files)
-    return _mutate_files(options, root, files, reports)
+    code = _mutate_files(options, root, files, reports)
+    return code if code not in (0, 3) else max(code, python_code)
 
 
 def main(argv: list[str] | None = None) -> None:
