@@ -6,9 +6,7 @@ import contextlib
 import io
 import math
 import os
-import selectors
 import shlex
-import signal
 import subprocess
 import sys
 import threading
@@ -16,19 +14,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-Command = str | list[str]
+from mutator.process import Command, ManagedProcess, spawn_process
 
 # A command is waited for in slices this long, so a stop is noticed quickly.
-# A slice also stays far below poll()'s limit of 2**31 - 1 ms, so a huge
-# --timeout-factor or --baseline-timeout can't overflow it.
+# A slice also stays far below OS wait limits, so a huge --timeout-factor or
+# --baseline-timeout can't overflow it.
 SLICE = 0.1
 # The longest any command is waited for, about 23 days. A huge or infinite
 # --timeout-factor or --baseline-timeout gets this bound instead.
 LONGEST_TIMEOUT = 2_000_000.0
-# How long a command has to end after SIGTERM before it gets SIGKILL. A mutator
-# run nested in a test command uses it to stop its own commands and clean up.
+# How long a command has to end after a soft stop before a hard kill. On POSIX
+# a mutator run nested in a test command uses it to stop its own commands and clean up.
 GRACE = 1.0
-# Each test process's data memory, in MiB, unless --memory-limit says otherwise.
+# Each test process's memory limit, in MiB, unless --memory-limit says otherwise.
 # A mutant that allocates without bound then fails within seconds, not at its timeout.
 MEMORY_LIMIT = 2048
 
@@ -110,12 +108,6 @@ def _keep_git_in_worker(cwd: Path, environment: dict) -> None:
     environment["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
 
 
-def worker_temp_link(worker: Path) -> Path:
-    """The link, beside the worker in its run folder, to the worker's own temp folder."""
-
-    return worker.parent / f"tmp-{worker.name}"
-
-
 def _keep_bytecode_beside_sources(cwd: Path, environment: dict) -> None:
     """A worker's commands keep any bytecode beside the worker's sources (issue #82).
 
@@ -127,25 +119,23 @@ def _keep_bytecode_beside_sources(cwd: Path, environment: dict) -> None:
         environment.pop("PYTHONPYCACHEPREFIX", None)
 
 
-def _use_worker_temp(cwd: Path, environment: dict) -> None:
+def _use_worker_temp(environment: dict, temp_dir: Path | None) -> None:
     """Give a worker's commands the worker's own temp folder (issue #54).
 
     Workers that shared one would share pytest's basetemp root, where each
     session prunes the others' folders.
     """
 
-    worker = _worker_home(cwd)
-    if worker is None:
+    if temp_dir is None:
         return
-    link = worker_temp_link(worker)
-    if not link.is_symlink():
-        return
-    own = link.readlink()
     # A test can remove its own temp folder. Made again in the run's private
     # folder, it keeps the worker's next commands off a shared one.
     with contextlib.suppress(OSError):
-        own.mkdir()
-    environment["TMPDIR"] = str(own)
+        temp_dir.mkdir()
+    value = str(temp_dir)
+    environment["TMPDIR"] = value
+    environment["TEMP"] = value
+    environment["TMP"] = value
 
 
 class Stopped(Exception):
@@ -153,45 +143,57 @@ class Stopped(Exception):
 
 
 class _Command:
-    """A running command, read and waited for without reaping its leader.
+    """A running command drained on a background thread without reaping its leader early."""
 
-    Until the leader is reaped, even as a zombie, its pid stays the id of its
-    group, so a signal to the group reaches only the command's processes.
-    Popen.communicate() reaps the leader as soon as it exits, while other
-    processes of its group may still run. So the output is read here, and
-    end() reaps the leader only after it has killed the rest of the group.
-    """
-
-    def __init__(self, process: subprocess.Popen):
+    def __init__(self, process: ManagedProcess):
         self.process = process
         self._chunks: list[bytes] = []
-        self._open = True
-        # Set before every call that can reap, so an exception inside one can't hide a reap.
-        self._may_be_reaped = False
-        self._selector = selectors.DefaultSelector()
-        self._selector.register(process.stdout, selectors.EVENT_READ)
+        self._lock = threading.Lock()
+        self._eof = threading.Event()
+        self._reader = threading.Thread(target=self._drain, daemon=True)
+        self._reader.start()
 
-    def signal(self, sig: int) -> bool:
-        """Signal the command's group while its leader is surely unreaped. Return whether it did."""
+    def _drain(self) -> None:
+        stream = self.process.stdout
+        if stream is None:
+            self._eof.set()
+            return
+        try:
+            fd = stream.fileno()
+            while True:
+                data = os.read(fd, 32768)
+                if not data:
+                    break
+                with self._lock:
+                    self._chunks.append(data)
+        except OSError:
+            pass
+        finally:
+            self._eof.set()
 
-        if self._may_be_reaped:
-            return False
-        _kill_group(self.process.pid, sig)
-        return True
+    def stop_soft(self) -> bool:
+        """Ask the command's process tree to stop cleanly."""
+
+        return self.process.stop_soft()
+
+    def stop_hard(self) -> bool:
+        """Forcefully kill the command's process tree."""
+
+        return self.process.stop_hard()
 
     def wait(self, timeout: float | None) -> str:
-        """Read the output to its end and wait until the leader exits, leaving it unreaped.
+        """Wait for output EOF and leader exit, leaving the leader unreaped on POSIX.
 
         Return the output. Raise TimeoutExpired after `timeout` seconds; None waits as long as it takes.
         """
 
         deadline = math.inf if timeout is None else time.monotonic() + timeout
         delay = 0.0005  # Popen.wait's back-off: 1 ms, doubling to 50 ms
-        while self._open or not self._exited():
+        while not self._eof.is_set() or not self._exited():
             left = deadline - time.monotonic()
             if left <= 0:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)
-            if self._open:
+            if not self._eof.is_set():
                 self._read(min(left, SLICE))
             else:
                 delay = min(delay * 2, left, 0.05)
@@ -199,109 +201,42 @@ class _Command:
         return self._output()
 
     def _read(self, seconds: float) -> None:
-        if self._selector.select(seconds):
-            data = os.read(self.process.stdout.fileno(), 32768)
-            self._chunks.append(data)
-            self._open = bool(data)
+        self._eof.wait(seconds)
 
     def _exited(self) -> bool:
-        """Whether the leader has exited. Only where os.waitid is missing does this reap it.
-
-        It is called only once the output has ended, so a leader it reaps
-        leaves nothing that holds the output for wait() to wait on.
-        """
-
-        if hasattr(os, "waitid"):  # macOS has it from Python 3.13
-            return os.waitid(os.P_PID, self.process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-        self._may_be_reaped = True
-        self._may_be_reaped = self.process.poll() is not None
-        return self._may_be_reaped
+        return self.process.has_exited()
 
     def _output(self) -> str:
         """The output read so far, decoded as Popen's text mode would."""
 
-        raw = io.BytesIO(b"".join(self._chunks))
-        stream = self.process.stdout
-        return io.TextIOWrapper(raw, encoding=stream.encoding, errors=stream.errors).read()
+        with self._lock:
+            raw = io.BytesIO(b"".join(self._chunks))
+        # A byte the locale can't decode shows as U+FFFD instead of crashing the run.
+        return io.TextIOWrapper(raw, encoding=None, errors="replace").read()
 
     def end(self, patience: float = 5.0) -> int:
-        """Kill what is left in the group, reap the leader, and wait until the group is gone.
+        """Kill what is left in the process tree, reap the leader, and close the pipe."""
 
-        Return the leader's exit code. One SIGKILL is enough: on Linux, a fork
-        that races a signal to its group either passes the signal to the child
-        or fails. A process still running there can add a file while the worker
-        folder is being removed, as a background child or a dying rustc does.
-        """
-
-        signalled = self.signal(signal.SIGKILL)
-        self._may_be_reaped = True
-        code = self.process.wait()
-        self._selector.close()
-        self.process.stdout.close()
-        if signalled:
-            _wait_until_gone(self.process.pid, patience)
+        code = self.process.reap(patience)
+        self._reader.join(timeout=patience)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
         return code
 
 
 def _stop(command: _Command) -> str:
-    """SIGTERM the command's group, give it GRACE to end, then SIGKILL it. Return its output."""
+    """Stop the command's process tree, giving it GRACE before a hard kill. Return its output."""
 
-    command.signal(signal.SIGTERM)
+    command.stop_soft()
     try:
         return command.wait(GRACE)
     except subprocess.TimeoutExpired:
-        command.signal(signal.SIGKILL)
+        command.stop_hard()
         return command.wait(None)
     except BaseException:
         # Ctrl-C or SIGTERM during the grace: don't wait it out.
-        command.signal(signal.SIGKILL)
+        command.stop_hard()
         raise
-
-
-def _kill_group(group: int, sig: int = signal.SIGKILL) -> None:
-    """Send a signal to the process group a command leads.
-
-    Linux implements killpg(group) as kill(-group), so group 1 means every
-    process this user may signal and group 0 means mutator's own group. A
-    command started in a new session leads a group above 1.
-    """
-
-    if group <= 1:
-        raise ValueError(f"refusing to signal process group {group}")
-    os.killpg(group, sig)
-
-
-def _wait_until_gone(group: int, patience: float) -> None:
-    """Wait until no process is left in the group, for at most `patience` seconds.
-
-    The leader is reaped by now, so its id is no longer known to be the
-    command's. Signal 0 sends nothing; it only asks whether the group exists.
-    """
-
-    deadline = time.monotonic() + patience
-    while time.monotonic() < deadline:
-        try:
-            _kill_group(group, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.01)
-
-
-def _limited(command: Command, megabytes: int) -> Command:
-    """The command, with each process's data memory (RLIMIT_DATA) limited to `megabytes` MiB. 0 is no limit.
-
-    A shell sets the limit and then execs the command, so the limit is set in
-    the child, and every process the command starts inherits it. It sets the
-    hard limit too, so no process can raise it again. A hard limit that is
-    already lower stays, and the command still runs. ulimit -d takes KiB, and
-    rlim_t holds bytes only below 2**64, so a larger limit is none.
-    """
-
-    if not megabytes:
-        return command
-    argv = ["/bin/sh", "-c", command] if isinstance(command, str) else command
-    kib = str(megabytes * 1024) if megabytes < 2**44 else "unlimited"
-    return ["/bin/sh", "-c", 'ulimit -d "$1" 2>/dev/null; shift; exec "$@"', "sh", kib, *argv]
 
 
 def display_command(command: Command) -> str:
@@ -313,9 +248,10 @@ def display_command(command: Command) -> str:
 
 
 class CommandRunner:
-    def __init__(self, verbose: bool = False, memory_limit: int = 0):
+    def __init__(self, verbose: bool = False, memory_limit: int = 0, env: dict[str, str] | None = None):
         self.verbose = verbose
         self.memory_limit = memory_limit
+        self.env = dict(env) if env else {}
         self._stopping = threading.Event()
 
     def stop(self) -> None:
@@ -341,7 +277,14 @@ class CommandRunner:
                 if time.monotonic() >= deadline:
                     raise
 
-    def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
+    def run(
+        self,
+        command: Command,
+        cwd: Path,
+        timeout: float | None,
+        *,
+        temp_dir: Path | None = None,
+    ) -> CommandResult:
         """Run `command` in `cwd`.
 
         A list is an argument vector and does not go through a shell, so a
@@ -356,33 +299,23 @@ class CommandRunner:
         started = time.monotonic()
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if self.env:
+            environment.update(self.env)
         _prefer_worker_sources(cwd, environment)
         _keep_git_in_worker(cwd, environment)
-        _use_worker_temp(cwd, environment)
+        _use_worker_temp(environment, temp_dir)
         _keep_bytecode_beside_sources(cwd, environment)
-        limited = _limited(command, self.memory_limit)
         try:
-            process = subprocess.Popen(
-                limited,
-                cwd=cwd,
-                shell=isinstance(limited, str),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                text=True,
-                # A byte the locale can't decode shows as U+FFFD instead of crashing the run.
-                errors="replace",
-                env=environment,
-            )
+            managed = spawn_process(command, cwd, environment, self.memory_limit)
         except OSError as exc:
             seconds = time.monotonic() - started
             result = CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
             return self._ended(cwd, result)
-        command = _Command(process)
+        running = _Command(managed)
         try:
-            output, timed_out = self._finish(command, timeout)
+            output, timed_out = self._finish(running, timeout)
         finally:
-            code = command.end()
+            code = running.end()
         code = 124 if timed_out else code
         seconds = time.monotonic() - started
         result = CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output)
@@ -450,8 +383,9 @@ def _project_interpreter(directory: Path) -> str:
     not link ``.venv``, and resolving ``bin/python`` would leave the virtualenv.
     """
 
+    sub, exe = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
     for name in (".venv", "venv"):
-        candidate = (directory / name / "bin" / "python").absolute()
+        candidate = (directory / name / sub / exe).absolute()
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return sys.executable
@@ -525,17 +459,17 @@ _PLANS = {
 }
 
 
-def test_plan(root: Path, source: Path, language: str, override: str | None) -> tuple[Command, Path]:
+def test_plan(root: Path, source: Path, language: str, override: Command | None) -> tuple[Command, Path]:
     """The test command and the directory it runs in.
 
-    A user override stays a shell string. Every generated command is an
-    argument vector, so a package path is one argument.
+    A string override stays a shell string. A list override or generated
+    command is an argument vector, so paths and flags stay verbatim arguments.
     """
 
     root = root.resolve()
     if override:
-        return override, root
+        return (list(override) if isinstance(override, list) else override), root
     plan = _PLANS.get(language)
     if plan is None:
-        return ["false"], root
+        return [sys.executable, "-c", "raise SystemExit(1)"], root
     return plan(root, source)

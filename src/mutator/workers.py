@@ -10,8 +10,10 @@ are linked. The worker is removed when the file's mutants finish.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
@@ -21,8 +23,11 @@ from queue import Empty, Queue
 from threading import Lock
 
 from mutator.model import Site
-from mutator.runner import RUN_MARKER, Command, CommandResult, worker_temp_link
+from mutator.runner import RUN_MARKER, Command, CommandResult, CommandRunner
 from mutator.sites import apply_site
+
+if os.name == "nt":
+    import _winapi
 
 # Build output and the worker tree itself must not be shared. A link to
 # ``target`` would point a worker at the directory that contains the worker.
@@ -47,6 +52,7 @@ SKIP_LINK = frozenset(
         ".gradle",
     }
 )
+
 
 class WorkerFailed(Exception):
     """The unmutated tests failed or timed out in a worker, so a failing mutant there proves nothing."""
@@ -86,27 +92,96 @@ def inside_workers(path: Path) -> bool:
     return any(_holds_workers(folder) for folder in (path, *path.parents))
 
 
+def _is_junction(path: Path) -> bool:
+    if os.name != "nt":
+        return False
+    if hasattr(path, "is_junction"):
+        try:
+            return path.is_junction()
+        except OSError:
+            return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    tag = getattr(st, "st_reparse_tag", 0)
+    return tag == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    return path.is_symlink() or _is_junction(path)
+
+
+def _unlink_readonly(path: Path) -> None:
+    try:
+        path.unlink()
+    except PermissionError:
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        path.unlink()
+
+
+def _rmdir_readonly(path: Path) -> None:
+    try:
+        path.rmdir()
+    except PermissionError:
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IRWXU)
+        path.rmdir()
+
+
+def _remove_link(path: Path) -> None:
+    """Remove a symlink or Windows directory junction without touching its target."""
+
+    if _is_junction(path) or (os.name == "nt" and path.is_symlink() and path.is_dir()):
+        try:
+            _rmdir_readonly(path)
+        except OSError:
+            _unlink_readonly(path)
+        return
+    _unlink_readonly(path)
+
+
+def _create_junction(target: Path, link: Path) -> None:
+    _winapi.CreateJunction(str(target), str(link))
+
+
 def symlink(link: Path, target: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink() or link.exists():
-        link.unlink()
-    link.symlink_to(target.resolve())
+    if _is_link_or_junction(link):
+        _remove_link(link)
+    elif link.exists():
+        delete_tree(link)
+    resolved = target.resolve()
+    if os.name != "nt":
+        link.symlink_to(resolved)
+        return
+    is_dir = resolved.is_dir()
+    try:
+        link.symlink_to(resolved, target_is_directory=is_dir)
+    except OSError:
+        if is_dir:
+            _create_junction(resolved, link)
+        elif resolved.is_file():
+            shutil.copy2(resolved, link)
 
 
 def delete_tree(path: Path) -> None:
-    """Remove a worker tree without following a link into the real project."""
+    """Remove a worker tree without following a link or junction into the real project."""
 
-    if path.is_symlink():
-        path.unlink()
+    if _is_link_or_junction(path):
+        _remove_link(path)
         return
     if not path.exists():
         return
     if path.is_dir():
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IRWXU)
         for child in list(path.iterdir()):
             delete_tree(child)
-        path.rmdir()
+        _rmdir_readonly(path)
         return
-    path.unlink()
+    _unlink_readonly(path)
 
 
 # A nested .git can name the project's repository, so no worker gets one.
@@ -132,7 +207,7 @@ def _copy_entry(destination: Path, source: Path) -> None:
 
     if source.name in LEFT_OUT:
         return
-    if source.is_symlink() or source.name in SHARED:
+    if _is_link_or_junction(source) or source.name in SHARED:
         symlink(destination, source)
     elif source.is_dir():
         destination.mkdir()
@@ -146,14 +221,14 @@ def _copy_entry(destination: Path, source: Path) -> None:
 
 def _copy_children(worker_dir: Path, real_dir: Path) -> None:
     # A linked node_modules on the source path would take the mutant to the original.
-    if worker_dir.is_symlink():
-        worker_dir.unlink()
+    if _is_link_or_junction(worker_dir):
+        _remove_link(worker_dir)
     worker_dir.mkdir(exist_ok=True)
     for child in real_dir.iterdir():
         if child.name in SKIP_LINK:
             continue
         destination = worker_dir / child.name
-        if destination.exists() or destination.is_symlink():
+        if destination.exists() or _is_link_or_junction(destination):
             continue
         _copy_entry(destination, child)
 
@@ -166,8 +241,9 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
         rel_dir = Path(*segments[:index])
         _copy_children(worker / rel_dir, root / rel_dir)
     # A new file, as the copy keeps a read-only source's mode.
-    (worker / relative).unlink()
-    (worker / relative).write_bytes(original)
+    target = worker / relative
+    _unlink_readonly(target)
+    target.write_bytes(original)
 
 
 def create_workers(
@@ -211,6 +287,17 @@ def mapped_cwd(worker: Path, root: Path, cwd: Path) -> Path:
     return (worker / relative).resolve()
 
 
+def _invoke(
+    runner, command: Command, cwd: Path, timeout: float, temp_dir: Path | None
+) -> CommandResult:
+    if temp_dir is not None and (
+        isinstance(runner, CommandRunner)
+        or "temp_dir" in inspect.signature(runner.run).parameters
+    ):
+        return runner.run(command, cwd, timeout, temp_dir=temp_dir)
+    return runner.run(command, cwd, timeout)
+
+
 def _execute(
     directory: Path,
     site: Site,
@@ -222,6 +309,7 @@ def _execute(
     cwd: Path,
     timeout: float,
     file_key: str,
+    temp_dir: Path | None,
 ) -> str:
     current = original[site.start : site.end].decode("utf-8")
     if current != site.original:
@@ -235,7 +323,7 @@ def _execute(
     destination.write_text(mutated, encoding="utf-8")
     _drop_bytecode(destination)
     try:
-        result = runner.run(command, mapped_cwd(directory, root, cwd), timeout)
+        result = _invoke(runner, command, mapped_cwd(directory, root, cwd), timeout, temp_dir)
     finally:
         destination.write_bytes(original)
     if result.timed_out or result.code != 0:
@@ -257,11 +345,12 @@ def _drain(
     timeout: float,
     baseline_timeout: float,
     file_key: str,
+    temp_dir: Path | None,
 ) -> None:
     # The worker shares no build output with the project. This unmutated run
     # builds it, so mutant runs start as warm as the baseline did and its
     # timeout is fair. It also proves the tests can pass in the worker at all.
-    control = runner.run(command, mapped_cwd(directory, root, cwd), baseline_timeout)
+    control = _invoke(runner, command, mapped_cwd(directory, root, cwd), baseline_timeout, temp_dir)
     if control.code != 0:
         raise WorkerFailed(control)
     while True:
@@ -283,6 +372,7 @@ def _drain(
             cwd,
             timeout,
             file_key,
+            temp_dir,
         )
         with lock:
             outcomes[site.mutation_id] = status
@@ -294,6 +384,7 @@ def _report(file_key: str, site: Site) -> None:
 
 def _run_all(
     directories: list[Path],
+    worker_temps: dict[Path, Path],
     sites: list[Site],
     outcomes: dict[str, str],
     root: Path,
@@ -328,6 +419,7 @@ def _run_all(
                     timeout,
                     baseline_timeout,
                     file_key,
+                    worker_temps.get(directory),
                 )
                 for directory in directories
             ]
@@ -340,7 +432,7 @@ def _run_all(
             raise
 
 
-def _make_temps(directories: list[Path], temps: list[str]) -> None:
+def _make_temps(directories: list[Path], temps: list[str]) -> dict[Path, Path]:
     """Give each worker a temp folder of its own (issue #54), in one private folder it adds to `temps`.
 
     The folders are short ones in mutator's own temp folder. One in the worker
@@ -350,30 +442,48 @@ def _make_temps(directories: list[Path], temps: list[str]) -> None:
 
     run_temp = Path(tempfile.mkdtemp(prefix="mutator-"))
     temps.append(str(run_temp))
+    assigned: dict[Path, Path] = {}
     for directory in directories:
         own = run_temp / directory.name
         own.mkdir()
-        worker_temp_link(directory).symlink_to(own)
+        assigned[directory] = own
+    return assigned
 
 
 def _remove_temp(folder: str) -> None:
     """Remove a run's temp folder, also folders its tests left unreadable or read-only.
 
-    Folders are opened up first, never through a symlink, whose target can be a
-    project folder. A test can even replace the run's folder with one: then
-    only the link goes. What still can't be removed is named on stderr.
+    Folders are opened up first, never through a symlink or junction, whose
+    target can be a project folder. A test can even replace the run's folder
+    with one: then only the link goes. What still can't be removed is named on stderr.
     """
 
-    if os.path.islink(folder):
-        os.unlink(folder)
+    target = Path(folder)
+    if _is_link_or_junction(target):
+        with contextlib.suppress(OSError):
+            _remove_link(target)
+        if os.path.lexists(folder):
+            print(f"mutator could not remove its temp folder {folder}", file=sys.stderr)
         return
     with contextlib.suppress(OSError):
         os.chmod(folder, 0o700)
-        for parent, names, _files in os.walk(folder):
+        for parent, names, files in os.walk(folder):
+            keep = []
             for name in names:
-                path = os.path.join(parent, name)
-                if not os.path.islink(path):
-                    os.chmod(path, 0o700)
+                path = Path(parent) / name
+                if _is_link_or_junction(path):
+                    with contextlib.suppress(OSError):
+                        _remove_link(path)
+                else:
+                    with contextlib.suppress(OSError):
+                        os.chmod(path, 0o700)
+                    keep.append(name)
+            names[:] = keep
+            for name in files:
+                path = Path(parent) / name
+                if not _is_link_or_junction(path):
+                    with contextlib.suppress(OSError):
+                        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
     shutil.rmtree(folder, ignore_errors=True)
     if os.path.lexists(folder):
         print(f"mutator could not remove its temp folder {folder}", file=sys.stderr)
@@ -404,9 +514,10 @@ def run_mutants(
         directories = create_workers(
             base, root, relative, original, worker_count(len(sites), max_workers)
         )
-        _make_temps(directories, temps)
+        worker_temps = _make_temps(directories, temps)
         _run_all(
             directories,
+            worker_temps,
             sites,
             outcomes,
             root,

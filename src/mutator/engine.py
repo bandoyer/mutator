@@ -117,13 +117,21 @@ def _listed_identity(path: Path) -> bytes:
 
 
 def _test_context(
-    files_digest: str | None, command: Command, cwd: Path, timeout_factor: float, memory_limit: int
+    files_digest: str | None,
+    command: Command,
+    cwd: Path,
+    timeout_factor: float,
+    memory_limit: int,
+    test_env: dict[str, str] | None = None,
 ) -> str | None:
     """What a kill depends on besides its own function. None when it can't be known."""
 
     if files_digest is None:
         return None
-    identity = repr((files_digest, _command_key(command), str(cwd), timeout_factor, memory_limit))
+    parts: tuple = (files_digest, _command_key(command), str(cwd), timeout_factor, memory_limit)
+    if test_env:
+        parts = (*parts, tuple(sorted(test_env.items())))
+    identity = repr(parts)
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
@@ -367,7 +375,7 @@ def mutate_file(
     ignore_coverage: bool,
     mutate_all: bool,
     lines: set[int] | None,
-    test_command: str | None,
+    test_command: Command | None,
     timeout_factor: float,
     mutation_warning: int,
     baselines: dict[tuple[tuple[str, ...], str], CommandResult],
@@ -400,7 +408,9 @@ def mutate_file(
     history = load_history(root, file_key)
     digests = form_digests(source, path, root)
     command, cwd = test_plan(root, path, language, test_command)
-    context = _test_context(files_digest, command, cwd, timeout_factor, runner.memory_limit)
+    context = _test_context(
+        files_digest, command, cwd, timeout_factor, runner.memory_limit, getattr(runner, "env", None)
+    )
     selected = _select(found, covered, history, digests, mutate_all, lines, context)
     outcomes = _carry_forward(found, covered, history, digests, context)
     _warn_many(file_key, selected, mutation_warning)

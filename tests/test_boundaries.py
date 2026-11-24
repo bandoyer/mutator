@@ -342,7 +342,7 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     assert directory == sub
     assert command[-2:] == ["-m", "pytest"]
 
-    result = CommandRunner().run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.4)
+    result = CommandRunner().run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, 0.4)
     assert result.timed_out is True
     assert result.code == 124
 
@@ -587,7 +587,7 @@ def test_cli_exit_codes_follow_kills_baseline_failure_and_an_empty_tree(tmp_path
     recorded = snapshot.read_text(encoding="utf-8")
 
     path.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
-    failing = f"{sys.executable} -c 'raise SystemExit(1)'"
+    failing = f'"{sys.executable}" -c "raise SystemExit(1)"'
     code = run(
         [
             "--no-coverage",
@@ -602,7 +602,7 @@ def test_cli_exit_codes_follow_kills_baseline_failure_and_an_empty_tree(tmp_path
     assert code == 2
     assert snapshot.read_text(encoding="utf-8") == recorded
 
-    hanging = f"{sys.executable} -c 'import time; time.sleep(30)'"
+    hanging = f'"{sys.executable}" -c "import time; time.sleep(30)"'
     code = run(
         [
             "--no-coverage",
@@ -636,7 +636,7 @@ def test_a_scan_ignores_a_backup_and_a_run_stops_on_one_that_differs(tmp_path, c
     assert "0 -> 1" in scanned
     assert "1 -> 0" not in scanned
 
-    failing = f"{sys.executable} -c 'raise SystemExit(1)'"
+    failing = f'"{sys.executable}" -c "raise SystemExit(1)"'
     mutate = ["--no-coverage", "--mutate-all", "--root", str(tmp_path), "--test-command", failing, "src/demo.py"]
     code = run(mutate)
     assert code == 1

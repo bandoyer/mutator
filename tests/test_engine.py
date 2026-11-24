@@ -14,8 +14,19 @@ from conftest import wait_until
 from mutator.engine import BASELINE_TIMEOUT, check_backups, mutate_file, project_files_digest
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
-from mutator.runner import CommandResult, CommandRunner, worker_temp_link
-from mutator.workers import create_workers, delete_tree, new_run_dir, worker_count
+from mutator.runner import CommandResult, CommandRunner
+from mutator.workers import (
+    _is_junction,
+    _is_link_or_junction,
+    _remove_temp,
+    create_workers,
+    delete_tree,
+    new_run_dir,
+    worker_count,
+)
+
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX permissions, signals, or FIFOs")
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows NTFS junction behavior")
 
 
 class FakeRunner:
@@ -180,7 +191,8 @@ def test_workers_copy_the_project_and_link_only_shared_folders(tmp_path):
     (tmp_path / "web" / ".venv" / "bin").mkdir(parents=True)
     (marker.parent / ".git").write_text("gitdir: /project/.git/worktrees/data\n", encoding="utf-8")
     (tmp_path / "tests" / "alias").symlink_to(marker)
-    os.mkfifo(tmp_path / "tests" / "pipe")
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(tmp_path / "tests" / "pipe")
     original = source.read_bytes()
 
     base = new_run_dir(tmp_path)
@@ -190,16 +202,16 @@ def test_workers_copy_the_project_and_link_only_shared_folders(tmp_path):
         for worker in workers:
             private = worker / "src" / "demo.py"
             assert private.is_file()
-            assert not private.is_symlink()
+            assert not _is_link_or_junction(private)
             assert private.read_bytes() == original
             for relative in ("src/other.py", "tests", "tests/data", "tests/data/keep.txt", "pyproject.toml", "web"):
-                assert not (worker / relative).is_symlink(), relative
+                assert not _is_link_or_junction(worker / relative), relative
             assert (worker / "tests" / "data" / "keep.txt").read_text(encoding="utf-8") == "keep"
-            assert (worker / "node_modules").is_symlink()
-            assert (worker / "web" / "node_modules").is_symlink()
-            assert (worker / "web" / ".venv").is_symlink()
+            assert _is_link_or_junction(worker / "node_modules")
+            assert _is_link_or_junction(worker / "web" / "node_modules")
+            assert _is_link_or_junction(worker / "web" / ".venv")
             assert not (worker / "tests" / "data" / ".git").exists()
-            assert (worker / "tests" / "alias").is_symlink()
+            assert _is_link_or_junction(worker / "tests" / "alias")
             assert not (worker / "tests" / "pipe").exists()
         for name in ("src/demo.py", "src/other.py", "tests/data/keep.txt"):
             workers[0].joinpath(name).write_text("changed\n", encoding="utf-8")
@@ -426,7 +438,11 @@ def test_a_backup_equal_to_its_source_is_deleted_and_one_that_differs_is_kept(tm
 
 # Workers don't share the project's target/. This command is slow until its
 # target/ holds a marker, the way a cold Cargo build is slow until target/ is built.
-COLD_BUILD = "test -f target/warm || { sleep 3; mkdir -p target && touch target/warm; }"
+_COLD_BUILD_PY = (
+    "import pathlib, time; p = pathlib.Path('target/warm'); "
+    "(None if p.is_file() else (time.sleep(3), p.parent.mkdir(parents=True, exist_ok=True), p.touch()))"
+)
+COLD_BUILD = [sys.executable, "-c", _COLD_BUILD_PY]
 
 
 def _mutate_with(tmp_path, test_command, verbose=False, **limits):
@@ -458,7 +474,11 @@ def test_a_cold_worker_build_is_not_counted_as_a_kill(tmp_path):
 
 
 def test_a_hanging_mutant_is_killed_by_the_baseline_timeout(tmp_path):
-    hang = COLD_BUILD + "; if grep -q 'return 0' demo.py; then sleep 30; fi"
+    hang = [
+        sys.executable,
+        "-c",
+        _COLD_BUILD_PY + "; 'return 0' in pathlib.Path('demo.py').read_text() and time.sleep(30)",
+    ]
     started = time.monotonic()
     result = _mutate_with(tmp_path, hang)
 
@@ -469,7 +489,10 @@ def test_a_hanging_mutant_is_killed_by_the_baseline_timeout(tmp_path):
 def test_tests_that_fail_unmutated_in_a_worker_stop_the_run(tmp_path):
     (tmp_path / ".venv").mkdir()
     (tmp_path / ".venv" / "python").touch()
-    result = _mutate_with(tmp_path, "test -f .venv/python")
+    result = _mutate_with(
+        tmp_path,
+        [sys.executable, "-c", "import pathlib, sys; sys.exit(0 if pathlib.Path('.venv/python').is_file() else 1)"],
+    )
 
     assert result.stopped
     assert "worker" in result.stopped
@@ -478,15 +501,19 @@ def test_tests_that_fail_unmutated_in_a_worker_stop_the_run(tmp_path):
 
 def test_a_hanging_baseline_stops_at_the_baseline_timeout(tmp_path):
     started = time.monotonic()
-    result = _mutate_with(tmp_path, "sleep 30", baseline_timeout=1)
+    result = _mutate_with(tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"], baseline_timeout=1)
 
     assert result.stopped
-    assert "Baseline timed out after 1 s for demo.py: sleep 30" in result.stopped
+    assert "Baseline timed out after 1 s for demo.py:" in result.stopped
     assert time.monotonic() - started < 15
 
 
 def test_a_hanging_control_run_stops_at_the_baseline_timeout(tmp_path):
-    hang_in_worker = 'case "$PWD" in *mutation-workers*) sleep 30;; esac; true'
+    hang_in_worker = [
+        sys.executable,
+        "-c",
+        "import os, time; 'mutation-workers' in os.getcwd() and time.sleep(30)",
+    ]
     started = time.monotonic()
     result = _mutate_with(tmp_path, hang_in_worker, baseline_timeout=1)
 
@@ -497,10 +524,17 @@ def test_a_hanging_control_run_stops_at_the_baseline_timeout(tmp_path):
 
 
 # Run only in a worker: the baseline runs in the real tree by design.
-WRITE_IN_WORKER = (
-    'case "$PWD" in *mutation-workers*) echo worker > note.txt; echo worker > data/fixture.txt;'
-    " git add -A > /dev/null 2>&1;; esac; true"
-)
+WRITE_IN_WORKER = [
+    sys.executable,
+    "-c",
+    (
+        "import os, pathlib, subprocess\n"
+        "if 'mutation-workers' in os.getcwd():\n"
+        "    pathlib.Path('note.txt').write_text('worker\\n', encoding='utf-8')\n"
+        "    pathlib.Path('data/fixture.txt').write_text('worker\\n', encoding='utf-8')\n"
+        "    subprocess.run(['git', 'add', '-A'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    ),
+]
 
 
 def test_a_test_that_writes_in_a_worker_changes_neither_the_project_nor_its_git_index(tmp_path):
@@ -519,9 +553,11 @@ def test_a_test_that_writes_in_a_worker_changes_neither_the_project_nor_its_git_
 
 
 def test_verbose_names_the_mutant_timeout_and_where_it_comes_from(tmp_path, capsys):
-    _mutate_with(tmp_path, "true", verbose=True)
+    _mutate_with(tmp_path, [sys.executable, "-c", "pass"], verbose=True)
 
-    assert "Mutant timeout for demo.py: 2.0 s (baseline 0.0 s x 10, at least 2 s)" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Mutant timeout for demo.py: 2.0 s (baseline " in err
+    assert " x 10, at least 2 s)" in err
 
 
 def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
@@ -532,7 +568,17 @@ def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
     path = project / "demo.py"
     path.write_text("def f(a):\n    return a + 1 > 0\n", encoding="utf-8")
     log = tmp_path / "temps.log"
-    record = f"{sys.executable} -c 'import os, tempfile; print(os.getcwd(), tempfile.gettempdir())' >> {log}"
+    record = [
+        sys.executable,
+        "-c",
+        (
+            "import os, pathlib, tempfile\n"
+            "run_dir = pathlib.Path(os.getcwd()).parent\n"
+            "links = [p.name for p in run_dir.glob('tmp-worker-*')] if run_dir.name.startswith('run-') else []\n"
+            f"with open({str(log)!r}, 'a', encoding='utf-8') as f:\n"
+            "    f.write(f\"{os.getcwd()}|{tempfile.gettempdir()}|{os.environ.get('TMPDIR', '')}|{os.environ.get('TEMP', '')}|{os.environ.get('TMP', '')}|{len(links)}\\n\")\n"
+        ),
+    ]
     mutate_file(
         path,
         project,
@@ -551,8 +597,11 @@ def test_each_worker_has_a_temp_folder_of_its_own(tmp_path):
     shared = tempfile.gettempdir()
     temps: dict[str, set[str]] = {}
     for line in log.read_text(encoding="utf-8").splitlines():
-        cwd, temp = line.split()
+        cwd, temp, tmpdir, env_temp, env_tmp, link_count = line.split("|")
+        assert link_count == "0", "worker temp folders must be passed in memory without tmp-worker-* symlinks"
         temps.setdefault(cwd, set()).add(temp)
+        if cwd != str(project.resolve()):
+            assert tmpdir == temp == env_temp == env_tmp
     # The baseline runs in the project, alone, and keeps mutator's temp folder.
     assert temps.pop(str(project.resolve())) == {shared}
     assert len(temps) == 2
@@ -577,11 +626,10 @@ def _mutate_in_worker(tmp_path, work):
         verbose = False
         memory_limit = 0
 
-        def run(self, command, cwd, timeout):
-            if "mutation-workers" in cwd.as_posix():
-                temp = worker_temp_link(cwd).readlink()
-                temps.append(temp)
-                work(temp)
+        def run(self, command, cwd, timeout, *, temp_dir=None):
+            if "mutation-workers" in cwd.as_posix() and temp_dir is not None:
+                temps.append(temp_dir)
+                work(temp_dir)
             return CommandResult(code=0, timed_out=False, seconds=0.01, output="")
 
     mutate_file(
@@ -620,6 +668,7 @@ def test_folders_a_test_locked_in_its_temp_folder_are_removed_but_not_through_a_
     outside.mkdir()
     (outside / "keep.txt").write_text("keep", encoding="utf-8")
     outside.chmod(0o500)
+    outside_mode = outside.stat().st_mode & 0o777
 
     def lock(temp):
         for name, mode in (("unreadable", 0o000), ("read-only", 0o500)):
@@ -627,16 +676,17 @@ def test_folders_a_test_locked_in_its_temp_folder_are_removed_but_not_through_a_
             if not folder.exists():
                 folder.mkdir()
                 (folder / "file.txt").write_text("x", encoding="utf-8")
+                (folder / "file.txt").chmod(0o444)
                 folder.chmod(mode)
-        if not (temp / "outside").is_symlink():
-            (temp / "outside").symlink_to(outside)
+        if not _is_link_or_junction(temp / "outside"):
+            (temp / "outside").symlink_to(outside, target_is_directory=True)
 
     try:
         temps = _mutate_in_worker(tmp_path, lock)
         assert temps
         assert not temps[0].exists()
         assert not temps[0].parent.exists()
-        assert outside.stat().st_mode & 0o777 == 0o500
+        assert outside.stat().st_mode & 0o777 == outside_mode
         assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
         assert "could not remove" not in capsys.readouterr().err
     finally:
@@ -650,16 +700,18 @@ def test_a_run_temp_folder_a_test_replaced_with_a_link_is_unlinked_and_its_targe
     (outside / "locked").mkdir(parents=True)
     (outside / "locked").chmod(0o500)
     outside.chmod(0o500)
+    outside_mode = outside.stat().st_mode & 0o777
+    locked_mode = (outside / "locked").stat().st_mode & 0o777
 
     def replace(temp):
-        if not temp.parent.is_symlink():
+        if not _is_link_or_junction(temp.parent):
             shutil.rmtree(temp.parent)
-            temp.parent.symlink_to(outside)
+            temp.parent.symlink_to(outside, target_is_directory=True)
 
     try:
         temps = _mutate_in_worker(tmp_path, replace)
-        assert outside.stat().st_mode & 0o777 == 0o500
-        assert (outside / "locked").stat().st_mode & 0o777 == 0o500
+        assert outside.stat().st_mode & 0o777 == outside_mode
+        assert (outside / "locked").stat().st_mode & 0o777 == locked_mode
         assert not os.path.lexists(temps[0].parent)
         assert "could not remove" not in capsys.readouterr().err
     finally:
@@ -676,6 +728,7 @@ def test_a_temp_folder_that_cannot_be_removed_is_named(tmp_path, monkeypatch, ca
     shutil.rmtree(temps[0].parent)
 
 
+@POSIX_ONLY
 def test_ctrl_c_stops_the_worker_commands_and_removes_the_run_folder(tmp_path, ctrl_c_when):
     started = tmp_path / "started"
     late = tmp_path / "late"
@@ -695,7 +748,17 @@ def test_ctrl_c_stops_the_worker_commands_and_removes_the_run_folder(tmp_path, c
 def test_ctrl_c_while_the_workers_start_still_stops_them(tmp_path, monkeypatch):
     started = tmp_path / "started"
     late = tmp_path / "late"
-    in_worker = f'case "$PWD" in *mutation-workers*) touch {started}; sleep 2; touch {late};; esac; true'
+    in_worker = [
+        sys.executable,
+        "-c",
+        (
+            "import os, pathlib, time\n"
+            "if 'mutation-workers' in os.getcwd():\n"
+            f"    pathlib.Path({str(started)!r}).touch()\n"
+            "    time.sleep(2)\n"
+            f"    pathlib.Path({str(late)!r}).touch()\n"
+        ),
+    ]
 
     class CtrlCDuringSubmit(ThreadPoolExecutor):
         def submit(self, *args, **kwargs):
@@ -731,13 +794,14 @@ def test_the_project_digest_is_none_when_a_listed_path_cannot_be_read(tmp_path):
     assert project_files_digest(tmp_path) not in (None, readable)
     (tmp_path / "target" / "mutation-workers-old" / "x").unlink()
     assert project_files_digest(tmp_path) == readable
-    secret = tmp_path / "secret.txt"
-    secret.write_text("x", encoding="utf-8")
-    secret.chmod(0)
-    try:
-        assert project_files_digest(tmp_path) is None
-    finally:
-        secret.chmod(0o600)
+    if os.name != "nt":
+        secret = tmp_path / "secret.txt"
+        secret.write_text("x", encoding="utf-8")
+        secret.chmod(0)
+        try:
+            assert project_files_digest(tmp_path) is None
+        finally:
+            secret.chmod(0o600)
     assert project_files_digest(tmp_path / "missing") is None
 
 
@@ -774,6 +838,7 @@ def test_a_listed_symlink_counts_by_its_target_name(tmp_path):
     assert project_files_digest(tmp_path) not in (None, linked)
 
 
+@POSIX_ONLY
 def test_a_listed_file_counts_by_its_execute_bit_too(tmp_path):
     # Git records 100755 apart from 100644, and a runner can pick tests by it.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
@@ -788,6 +853,7 @@ def test_a_listed_file_counts_by_its_execute_bit_too(tmp_path):
     assert project_files_digest(tmp_path) == runnable
 
 
+@POSIX_ONLY
 def test_a_listed_path_that_is_no_regular_file_keeps_nothing_and_does_not_block(tmp_path):
     # Opening a FIFO waits for a writer, so it must not be opened.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
@@ -800,3 +866,60 @@ def test_a_listed_path_that_is_no_regular_file_keeps_nothing_and_does_not_block(
     worker.start()
     worker.join(5)
     assert done == [None]
+
+
+@WINDOWS_ONLY
+def test_windows_junction_fallback_and_safe_delete_tree(tmp_path, monkeypatch):
+    # Simulate a Windows user without symlink privilege (WinError 1314):
+    # SHARED directories must fall back to NTFS junctions and delete_tree must
+    # remove the junctions without deleting any files in the real project.
+    source = tmp_path / "src" / "demo.py"
+    source.parent.mkdir()
+    source.write_text("def f():\n    return 1\n", encoding="utf-8")
+    dep = tmp_path / "node_modules" / "pkg" / "index.js"
+    dep.parent.mkdir(parents=True)
+    dep.write_text("export const ok = 1;\n", encoding="utf-8")
+    nested = tmp_path / "web" / "node_modules" / "lib.js"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("export const lib = 2;\n", encoding="utf-8")
+
+    def deny_symlink(self, *args, **kwargs):
+        raise OSError(13, "A required privilege is not held by the client", None, 1314)
+
+    monkeypatch.setattr(Path, "symlink_to", deny_symlink)
+
+    base = new_run_dir(tmp_path)
+    try:
+        worker = create_workers(base, tmp_path, "src/demo.py", source.read_bytes(), 1)[0]
+        assert _is_junction(worker / "node_modules")
+        assert _is_junction(worker / "web" / "node_modules")
+        assert (worker / "node_modules" / "pkg" / "index.js").read_text(encoding="utf-8") == "export const ok = 1;\n"
+    finally:
+        delete_tree(base)
+
+    assert not base.exists()
+    assert dep.read_text(encoding="utf-8") == "export const ok = 1;\n"
+    assert nested.read_text(encoding="utf-8") == "export const lib = 2;\n"
+
+
+def test_read_only_files_are_cleaned_up_in_delete_tree_and_remove_temp(tmp_path, capsys):
+    tree = tmp_path / "worker"
+    nested = tree / "sub"
+    nested.mkdir(parents=True)
+    ro_file = nested / "artifact.txt"
+    ro_file.write_text("locked\n", encoding="utf-8")
+    ro_file.chmod(0o444)
+
+    delete_tree(tree)
+    assert not tree.exists()
+
+    temp = tmp_path / "temp-run"
+    temp_sub = temp / "worker-0" / "sub"
+    temp_sub.mkdir(parents=True)
+    ro_temp = temp_sub / "artifact.txt"
+    ro_temp.write_text("locked\n", encoding="utf-8")
+    ro_temp.chmod(0o444)
+
+    _remove_temp(str(temp))
+    assert not temp.exists()
+    assert "could not remove" not in capsys.readouterr().err

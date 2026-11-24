@@ -1,4 +1,5 @@
 import ast
+import locale
 import math
 import os
 import shlex
@@ -12,21 +13,27 @@ from pathlib import Path
 import pytest
 from conftest import wait_until
 
-import mutator.runner as runner_module
+import mutator.process as process_module
+from mutator.process import (
+    _PosixProcess,
+    _kill_group,
+    _memory_limit_bytes,
+    _wait_until_gone,
+    spawn_process,
+)
 from mutator.runner import (
     CommandRunner,
     Stopped,
     _Command,
     _clojure_command,
     _keep_git_in_worker,
-    _kill_group,
-    _limited,
     _python_command,
-    _wait_until_gone,
     nearest,
-    worker_temp_link,
 )
 from mutator.runner import test_plan as plan_command
+
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups, signals, or shell semantics")
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows-specific Job Object and filesystem behavior")
 
 
 def test_nearest_walks_up_to_the_marker(tmp_path):
@@ -76,21 +83,28 @@ def _executable(path):
     path.chmod(0o755)
 
 
+def _venv_python(project: Path, name: str = ".venv") -> Path:
+    if os.name == "nt":
+        return project / name / "Scripts" / "python.exe"
+    return project / name / "bin" / "python"
+
+
 def test_python_command_uses_an_absolute_project_interpreter(tmp_path):
     project = tmp_path / "proj"
-    dot = project / ".venv" / "bin" / "python"
+    dot = _venv_python(project, ".venv")
     _executable(dot)
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     assert _python_command(project) == [str(dot.absolute()), "-m", "pytest"]
 
     other = tmp_path / "other"
-    plain = other / "venv" / "bin" / "python"
+    plain = _venv_python(other, "venv")
     _executable(plain)
     assert _python_command(other) == [str(plain.absolute()), "-m", "unittest", "discover"]
 
-    _executable(other / ".venv" / "bin" / "python")
+    preferred = _venv_python(other, ".venv")
+    _executable(preferred)
     assert _python_command(other) == [
-        str((other / ".venv" / "bin" / "python").absolute()),
+        str(preferred.absolute()),
         "-m",
         "unittest",
         "discover",
@@ -101,19 +115,23 @@ def test_python_command_keeps_the_virtualenv_symlink(tmp_path):
     project = tmp_path / "proj"
     target = project / "real-python"
     _executable(target)
-    link = project / ".venv" / "bin" / "python"
+    link = _venv_python(project, ".venv")
     link.parent.mkdir(parents=True)
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks require privileges on this Windows machine")
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     assert _python_command(project) == [str(link.absolute()), "-m", "pytest"]
 
 
 def test_python_command_falls_back_when_the_virtualenv_cannot_run(tmp_path):
-    project = tmp_path / "proj"
-    binary = project / ".venv" / "bin" / "python"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("", encoding="utf-8")
-    assert _python_command(project) == [sys.executable, "-m", "unittest", "discover"]
+    if os.name != "nt":
+        project = tmp_path / "proj"
+        binary = project / ".venv" / "bin" / "python"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("", encoding="utf-8")
+        assert _python_command(project) == [sys.executable, "-m", "unittest", "discover"]
 
     missing = tmp_path / "missing"
     missing.mkdir()
@@ -146,6 +164,15 @@ def test_python_commands(tmp_path):
     assert _python_command(conf)[-2:] == ["-m", "pytest"]
 
 
+def test_unknown_language_plan_fails_cross_platform(tmp_path):
+    source = tmp_path / "app.unknown"
+    source.write_text("x\n", encoding="utf-8")
+    command, directory = plan_command(tmp_path, source, "unknown", None)
+    assert directory == tmp_path.resolve()
+    result = CommandRunner().run(command, directory, 5)
+    assert result.code == 1
+
+
 def test_a_go_package_path_is_one_argument(tmp_path):
     root = tmp_path / "proj"
     package = root / "a;echo no"
@@ -156,7 +183,9 @@ def test_a_go_package_path_is_one_argument(tmp_path):
     command, directory = plan_command(root, source, "go", None)
     assert command == ["go", "test", "-count=1", "./a;echo no"]
     assert directory == root
-    echoed = CommandRunner().run(["/bin/echo", command[-1]], directory, None)
+    echoed = CommandRunner().run(
+        [sys.executable, "-c", "import sys; print(sys.argv[1])", command[-1]], directory, None
+    )
     assert echoed.code == 0
     assert echoed.output.strip() == "./a;echo no"
 
@@ -174,7 +203,7 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
     (worker / "src").mkdir(parents=True)
     (worker / "src" / "demo.py").write_text("VALUE = 'worker'\n", encoding="utf-8")
-    command = f"{sys.executable} -c 'import demo; print(demo.VALUE)'"
+    command = [sys.executable, "-c", "import demo; print(demo.VALUE)"]
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"
@@ -203,7 +232,7 @@ def test_a_worker_command_gets_no_pycache_prefix(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "prefix"))
     worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
     worker.mkdir(parents=True)
-    command = f"{shlex.quote(sys.executable)} -c 'import sys; print(sys.pycache_prefix)'"
+    command = [sys.executable, "-c", "import sys; print(sys.pycache_prefix)"]
     assert CommandRunner().run(command, worker, 10).output.strip() == "None"
     assert CommandRunner().run(command, tmp_path, 10).output.strip() == str(tmp_path / "prefix")
 
@@ -222,28 +251,48 @@ def test_a_worker_command_names_no_git_repository_and_keeps_existing_ceilings(tm
     assert outside == {"GIT_DIR": "/project/.git"}
 
 
-def test_only_a_worker_with_a_linked_temp_folder_gets_it_as_tmpdir(tmp_path):
+def test_temp_dir_sets_tmpdir_temp_and_tmp_and_recreates_when_removed(tmp_path):
     worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
     (worker / "sub").mkdir(parents=True)
     own = tmp_path / "own"
     own.mkdir()
-    command = f"{sys.executable} -c 'import tempfile; print(tempfile.gettempdir())'"
+    command = [
+        sys.executable,
+        "-c",
+        "import os, tempfile; print(tempfile.gettempdir(), os.environ.get('TMPDIR'), os.environ.get('TEMP'), os.environ.get('TMP'), sep='|')",
+    ]
     inherited = tempfile.gettempdir()
 
-    assert CommandRunner().run(command, worker, 5).output.strip() == inherited
-    worker_temp_link(worker).symlink_to(own)
-    assert CommandRunner().run(command, worker, 5).output.strip() == str(own)
-    assert CommandRunner().run(command, worker / "sub", 5).output.strip() == str(own)
-    assert CommandRunner().run(command, tmp_path, 5).output.strip() == inherited
-    # A test removed it: the next command gets it again, not a shared one.
+    no_temp = CommandRunner().run(command, worker, 5).output.strip().split("|")
+    assert no_temp[0] == inherited
+
+    for cwd in (worker, worker / "sub"):
+        got = CommandRunner().run(command, cwd, 5, temp_dir=own).output.strip().split("|")
+        assert got == [str(own)] * 4
+
+    # A test removed it: the next command recreates it instead of falling back to a shared folder.
     own.rmdir()
-    assert CommandRunner().run(command, worker, 5).output.strip() == str(own)
+    got = CommandRunner().run(command, worker, 5, temp_dir=own).output.strip().split("|")
+    assert got == [str(own)] * 4
     assert own.is_dir()
 
 
+def test_runner_applies_extra_env_to_test_commands(tmp_path):
+    command = [
+        sys.executable,
+        "-c",
+        "import os; print(os.environ.get('MUTATOR_CUSTOM_A'), os.environ.get('MUTATOR_CUSTOM_B'))",
+    ]
+    runner = CommandRunner(env={"MUTATOR_CUSTOM_A": "alpha", "MUTATOR_CUSTOM_B": "-flag"})
+    result = runner.run(command, tmp_path, 5)
+    assert result.code == 0
+    assert result.output.strip() == "alpha -flag"
+
+
+@POSIX_ONLY
 def test_only_a_group_the_command_leads_is_signalled(monkeypatch):
     sent = []
-    monkeypatch.setattr("mutator.runner.os.killpg", lambda group, sig: sent.append((group, sig)))
+    monkeypatch.setattr("mutator.process.os.killpg", lambda group, sig: sent.append((group, sig)))
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for group in (1, 0, -7):
             with pytest.raises(ValueError):
@@ -256,10 +305,33 @@ def test_only_a_group_the_command_leads_is_signalled(monkeypatch):
 
 def test_nothing_the_command_started_outlives_the_run(tmp_path):
     late = tmp_path / "late.txt"
-    command = f"(sleep 0.3; echo late > {shlex.quote(str(late))}) >/dev/null 2>&1 &"
-    result = CommandRunner().run(command, tmp_path, 5)
+    child = f"import time; time.sleep(0.4); open({str(late)!r}, 'w').write('late')"
+    parent = (
+        f"import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+    )
+    result = CommandRunner().run([sys.executable, "-c", parent], tmp_path, 5)
     assert result.code == 0
-    time.sleep(0.6)
+    time.sleep(0.7)
+    assert not late.exists()
+
+
+def test_timeout_kills_process_tree_including_grandchildren(tmp_path):
+    started = tmp_path / "started"
+    late = tmp_path / "late"
+    grandchild = f"import time; open({str(started)!r}, 'w').write('1'); time.sleep(1.0); open({str(late)!r}, 'w').write('late')"
+    parent = (
+        f"import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"time.sleep(30)"
+    )
+    result = CommandRunner().run([sys.executable, "-c", parent], tmp_path, 0.5)
+    assert result.timed_out is True
+    assert result.code == 124
+    if started.exists():
+        wait_until(started, 1.3)
+    else:
+        time.sleep(1.3)
     assert not late.exists()
 
 
@@ -267,7 +339,7 @@ def test_a_timeout_longer_than_poll_accepts_still_runs_the_command(tmp_path):
     # poll() takes at most 2**31 - 1 ms, about 24.8 days. --baseline-timeout 1e7
     # passes 1e7 s, and a 3 s baseline times --timeout-factor 1e308 is inf.
     for timeout in (1e7, math.inf):
-        result = CommandRunner().run("sleep 0.2", tmp_path, timeout)
+        result = CommandRunner().run([sys.executable, "-c", "import time; time.sleep(0.2)"], tmp_path, timeout)
         assert (result.code, result.timed_out) == (0, False), timeout
 
 
@@ -279,8 +351,8 @@ def test_the_run_waits_until_the_group_is_gone(monkeypatch):
         if len(signals) == 3:
             raise ProcessLookupError
 
-    monkeypatch.setattr("mutator.runner._kill_group", kill_group)
-    monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
+    monkeypatch.setattr("mutator.process._kill_group", kill_group)
+    monkeypatch.setattr("mutator.process.time.sleep", lambda seconds: None)
     _wait_until_gone(4242, 5.0)
     assert signals == [(4242, 0)] * 3
 
@@ -288,9 +360,9 @@ def test_the_run_waits_until_the_group_is_gone(monkeypatch):
 def test_the_wait_for_the_group_gives_up_at_the_deadline(monkeypatch):
     signals = []
     clock = iter([0.0, 1.0, 4.0, 5.0])
-    monkeypatch.setattr("mutator.runner._kill_group", lambda group, sig: signals.append((group, sig)))
-    monkeypatch.setattr("mutator.runner.time.monotonic", lambda: next(clock))
-    monkeypatch.setattr("mutator.runner.time.sleep", lambda seconds: None)
+    monkeypatch.setattr("mutator.process._kill_group", lambda group, sig: signals.append((group, sig)))
+    monkeypatch.setattr("mutator.process.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("mutator.process.time.sleep", lambda seconds: None)
     _wait_until_gone(4242, patience=5.0)
     assert signals == [(4242, 0)] * 2
 
@@ -324,13 +396,13 @@ def _signal_senders():
 
 def test_signals_go_only_through_the_group_guard():
     # killpg(1) is kill(-1) on Linux: it reaches every process the user owns.
-    assert _signal_senders() == [("runner.py", "_kill_group")]
+    assert _signal_senders() == [("process.py", "_kill_group")]
 
 
 def test_verbose_reports_how_each_command_ended(tmp_path, capsys):
     runner = CommandRunner(verbose=True)
-    runner.run("exit 3", tmp_path, None)
-    runner.run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.4)
+    runner.run([sys.executable, "-c", "raise SystemExit(3)"], tmp_path, None)
+    runner.run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, 0.4)
     runner.run(["/no/such/program"], tmp_path, None)
 
     lines = capsys.readouterr().err.splitlines()
@@ -340,6 +412,7 @@ def test_verbose_reports_how_each_command_ended(tmp_path, capsys):
     assert lines[5].startswith(f"= ({tmp_path}) exit 127 in ")
 
 
+@POSIX_ONLY
 def test_ctrl_c_stops_the_command_it_interrupts(tmp_path, ctrl_c_when):
     started = tmp_path / "started"
     late = tmp_path / "late"
@@ -352,6 +425,7 @@ def test_ctrl_c_stops_the_command_it_interrupts(tmp_path, ctrl_c_when):
     assert not late.exists()
 
 
+@POSIX_ONLY
 def test_the_ctrl_c_tests_hold_when_the_run_starts_with_sigint_ignored(tmp_path):
     # A shell starts a background job with SIGINT ignored, and Python keeps it
     # ignored, so a Ctrl-C test's SIGINT would do nothing (issue #86).
@@ -365,6 +439,7 @@ def test_the_ctrl_c_tests_hold_when_the_run_starts_with_sigint_ignored(tmp_path)
     assert "1 passed" in done.stdout, done.stdout[-2000:]
 
 
+@POSIX_ONLY
 def test_ctrl_c_stops_what_a_finished_command_left_holding_its_output(tmp_path, ctrl_c_when):
     # Issue #44: the shell exits at once; its background child keeps the output
     # pipe open. The leader stays unreaped, so its group can still be stopped.
@@ -380,6 +455,7 @@ def test_ctrl_c_stops_what_a_finished_command_left_holding_its_output(tmp_path, 
     assert not late.exists()
 
 
+@POSIX_ONLY
 def test_ctrl_c_during_the_grace_stops_what_holds_the_output(tmp_path, ctrl_c_when):
     # The shell exits on SIGTERM; its background child ignores SIGTERM and holds the output.
     graced = tmp_path / "graced"
@@ -394,7 +470,7 @@ def test_ctrl_c_during_the_grace_stops_what_holds_the_output(tmp_path, ctrl_c_wh
     assert not late.exists()
 
 
-WAITID = os.waitid
+WAITID = getattr(os, "waitid", None)
 
 
 @pytest.fixture
@@ -402,9 +478,9 @@ def group_signals(monkeypatch):
     """Each signal other than 0 sent to a group, as (signal, whether its leader was already reaped)."""
 
     sent = []
-    real = runner_module._kill_group
+    real = process_module._kill_group
 
-    def spy(group, sig=signal.SIGKILL):
+    def spy(group, sig=9):
         if sig != 0:
             try:
                 WAITID(os.P_PID, group, os.WEXITED | os.WNOHANG | os.WNOWAIT)
@@ -413,10 +489,11 @@ def group_signals(monkeypatch):
                 sent.append((sig, True))
         real(group, sig)
 
-    monkeypatch.setattr("mutator.runner._kill_group", spy)
+    monkeypatch.setattr("mutator.process._kill_group", spy)
     return sent
 
 
+@POSIX_ONLY
 @pytest.mark.parametrize(
     "command, timeout",
     [
@@ -464,6 +541,7 @@ def _interrupt_after_the_reap(monkeypatch):
     return fired
 
 
+@POSIX_ONLY
 def test_without_waitid_an_interrupted_reap_is_never_signalled(tmp_path, group_signals, monkeypatch):
     # macOS before Python 3.13: the leader's exit can only be seen by reaping it.
     fired = _interrupt_after_the_reap(monkeypatch)
@@ -476,6 +554,7 @@ def test_without_waitid_an_interrupted_reap_is_never_signalled(tmp_path, group_s
     assert [sig for sig, reaped in group_signals if reaped] == []
 
 
+@POSIX_ONLY
 def test_without_waitid_a_timed_out_command_is_still_stopped(tmp_path, group_signals, monkeypatch):
     monkeypatch.delattr(os, "waitid")
     result = CommandRunner().run("sleep 30", tmp_path, 0.3)
@@ -485,6 +564,7 @@ def test_without_waitid_a_timed_out_command_is_still_stopped(tmp_path, group_sig
     assert [sig for sig, reaped in group_signals if reaped] == []
 
 
+@POSIX_ONLY
 def test_ctrl_c_during_the_grace_kills_the_command_at_once(tmp_path, ctrl_c_when):
     graced = tmp_path / "graced"
     late = tmp_path / "late"
@@ -498,6 +578,7 @@ def test_ctrl_c_during_the_grace_kills_the_command_at_once(tmp_path, ctrl_c_when
     assert not late.exists()
 
 
+@POSIX_ONLY
 def test_a_timed_out_command_gets_sigterm_before_sigkill(tmp_path):
     termed = tmp_path / "termed"
     command = f"trap 'touch {termed}; exit 0' TERM; sleep 30 & wait"
@@ -507,6 +588,7 @@ def test_a_timed_out_command_gets_sigterm_before_sigkill(tmp_path):
     assert termed.exists()
 
 
+@POSIX_ONLY
 def test_a_timed_out_command_that_ignores_sigterm_is_killed_after_the_grace(tmp_path):
     started = time.monotonic()
     result = CommandRunner().run("echo before; trap '' TERM; sleep 30", tmp_path, 0.3)
@@ -555,6 +637,7 @@ def test_an_endless_timeout_is_bounded(monkeypatch):
 NESTED_RUN = "import sys\nfrom mutator.cli import run\nsys.exit(run(sys.argv[1:]))\n"
 
 
+@POSIX_ONLY
 def test_a_timed_out_command_lets_a_nested_run_clean_up(tmp_path):
     # Issue #21: mutator's own tests call run() in the test process, so a
     # mutant can start a whole mutation run inside a worker's test command.
@@ -578,43 +661,47 @@ def test_a_timed_out_command_lets_a_nested_run_clean_up(tmp_path):
 
 def test_stop_after_a_command_finished_signals_nothing_and_starts_nothing(monkeypatch, tmp_path):
     runner = CommandRunner()
-    runner.run("true", tmp_path, 5)
+    runner.run([sys.executable, "-c", "pass"], tmp_path, 5)
     sent = []
-    monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
+    monkeypatch.setattr("mutator.process._kill_group", lambda *args: sent.append(args))
 
     runner.stop()
 
     assert sent == []
+    ran = tmp_path / "ran"
     with pytest.raises(Stopped):
-        runner.run(f"touch {tmp_path / 'ran'}", tmp_path, 5)
-    assert not (tmp_path / "ran").exists()
+        runner.run([sys.executable, "-c", f"open({str(ran)!r}, 'w').close()"], tmp_path, 5)
+    assert not ran.exists()
 
 
+@POSIX_ONLY
 def test_a_reaped_leader_is_never_signalled(monkeypatch):
-    finished = _Command(subprocess.Popen(["true"], stdout=subprocess.PIPE, start_new_session=True, text=True))
+    finished = _Command(_PosixProcess(subprocess.Popen(["true"], stdout=subprocess.PIPE, start_new_session=True)))
     finished.wait(5)
     assert finished.end() == 0
     sent = []
-    monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
+    monkeypatch.setattr("mutator.process._kill_group", lambda *args: sent.append(args))
 
-    assert finished.signal(signal.SIGTERM) is False
+    assert finished.stop_soft() is False
     assert sent == []
 
 
+@POSIX_ONLY
 def test_an_unreaped_leader_is_signalled_with_or_without_waitid(monkeypatch):
     sent = []
-    monkeypatch.setattr("mutator.runner._kill_group", lambda *args: sent.append(args))
-    process = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True, text=True)
-    running = _Command(process)
+    monkeypatch.setattr("mutator.process._kill_group", lambda *args: sent.append(args))
+    process = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
+    running = _Command(_PosixProcess(process))
     try:
-        assert running.signal(signal.SIGTERM) is True
-        monkeypatch.delattr("mutator.runner.os.waitid")  # macOS before Python 3.13
+        assert running.stop_soft() is True
+        monkeypatch.delattr("mutator.process.os.waitid")  # macOS before Python 3.13
         with pytest.raises(subprocess.TimeoutExpired):
             running.wait(0.05)  # reaps nothing while the leader runs
-        assert running.signal(signal.SIGKILL) is True
+        assert running.stop_hard() is True
     finally:
         process.kill()
         process.wait()
+        running._reader.join(timeout=2)
         process.stdout.close()
 
     assert sent == [(process.pid, signal.SIGTERM), (process.pid, signal.SIGKILL)]
@@ -622,20 +709,38 @@ def test_an_unreaped_leader_is_signalled_with_or_without_waitid(monkeypatch):
 
 def test_the_output_and_the_exit_code_wait_for_each_other(tmp_path):
     # The leader exits before a child it left writes the rest of the output.
-    held = CommandRunner().run("(sleep 0.2; echo late) & echo early", tmp_path, 5)
+    child = "import time; time.sleep(0.2); print('late', flush=True)"
+    leader = f"import subprocess, sys; print('early', flush=True); subprocess.Popen([sys.executable, '-c', {child!r}])"
+    held = CommandRunner().run([sys.executable, "-c", leader], tmp_path, 5)
     assert held.output == "early\nlate\n"
     # The leader closes its output long before it exits.
-    closed = CommandRunner().run("echo early; exec >&-; sleep 0.2; exit 3", tmp_path, 5)
+    close_first = (
+        "import os, sys, time; print('early', flush=True); "
+        "os.close(1); os.close(2); time.sleep(0.2); sys.exit(3)"
+    )
+    closed = CommandRunner().run([sys.executable, "-c", close_first], tmp_path, 5)
     assert (closed.code, closed.output) == (3, "early\n")
 
 
+def test_large_output_is_drained_without_deadlock(tmp_path):
+    # More than a pipe buffer (typically 4-64 KiB) to verify threaded draining never deadlocks.
+    result = CommandRunner().run(
+        [sys.executable, "-c", "print('x' * 200_000)"],
+        tmp_path,
+        10,
+    )
+    assert result.code == 0
+    assert result.output == ("x" * 200_000) + "\n"
+
+
+@POSIX_ONLY
 @pytest.mark.parametrize(
     ("command", "timeout", "output"),
     [
-        (r"printf 'bad \377 byte\n'; exit 1", 5, "bad � byte\n"),
-        (r"printf 'cut \303'", 5, "cut �"),
-        (r"printf 'slow \377\n'; sleep 30", 0.3, "slow �\n"),
-        (r"printf '\177\200'", 5, "\x7f�"),
+        (r"printf 'bad \377 byte\n'; exit 1", 5, "bad \ufffd byte\n"),
+        (r"printf 'cut \303'", 5, "cut \ufffd"),
+        (r"printf 'slow \377\n'; sleep 30", 0.3, "slow \ufffd\n"),
+        (r"printf '\177\200'", 5, "\x7f\ufffd"),
     ],
     ids=["mid-line", "cut-off-at-the-end", "timed-out", "first-byte-past-ascii"],
 )
@@ -644,9 +749,20 @@ def test_output_the_locale_cannot_decode_keeps_the_rest_readable(tmp_path, comma
     assert CommandRunner().run(command, tmp_path, timeout).output == output
 
 
-def test_a_wait_with_no_time_left_times_out_without_reading(monkeypatch):
-    process = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True, text=True)
-    command = _Command(process)
+def test_undecodable_bytes_are_replaced_cross_platform(tmp_path):
+    # Pick a byte invalid in the current locale encoding (UTF-8: 0xff; cp1252: 0x81).
+    enc = locale.getpreferredencoding(False).lower()
+    bad = b"\x81" if "1252" in enc else b"\xff"
+    code = f"import sys; sys.stdout.buffer.write(b'ok ' + {bad!r} + b' end\\n'); sys.stdout.buffer.flush()"
+    result = CommandRunner().run([sys.executable, "-c", code], tmp_path, 5)
+    assert result.code == 0
+    assert result.output.startswith("ok ")
+    assert result.output.endswith(" end\n")
+
+
+def test_a_wait_with_no_time_left_times_out_without_reading(tmp_path, monkeypatch):
+    managed = spawn_process([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, os.environ.copy())
+    command = _Command(managed)
     monkeypatch.setattr("mutator.runner.time.monotonic", lambda: 100.0)
     monkeypatch.setattr(command, "_read", lambda seconds: pytest.fail("read with no time left"))
     try:
@@ -657,9 +773,9 @@ def test_a_wait_with_no_time_left_times_out_without_reading(monkeypatch):
         command.end()
 
 
-def test_after_the_output_ends_the_exit_is_polled_with_a_doubling_delay(monkeypatch):
-    process = subprocess.Popen(["true"], stdout=subprocess.PIPE, start_new_session=True, text=True)
-    command = _Command(process)
+def test_after_the_output_ends_the_exit_is_polled_with_a_doubling_delay(tmp_path, monkeypatch):
+    managed = spawn_process([sys.executable, "-c", "pass"], tmp_path, os.environ.copy())
+    command = _Command(managed)
     command.wait(5)
     exits = iter([False] * 8 + [True])
     sleeps = []
@@ -676,7 +792,10 @@ def test_after_the_output_ends_the_exit_is_polled_with_a_doubling_delay(monkeypa
 
 @pytest.mark.parametrize(
     "command",
-    [[sys.executable, "-c", "bytes(128 << 20)"], f"{sys.executable} -c 'bytes(128 << 20)'"],
+    [
+        [sys.executable, "-c", "bytes(128 << 20)"],
+        f'"{sys.executable}" -c "bytes(128 << 20)"',
+    ],
     ids=["argv", "shell"],
 )
 def test_each_process_of_a_command_gets_the_memory_limit(tmp_path, command):
@@ -686,6 +805,15 @@ def test_each_process_of_a_command_gets_the_memory_limit(tmp_path, command):
     assert CommandRunner(memory_limit=0).run(command, tmp_path, 30).code == 0
 
 
+def test_memory_limit_bytes_bounds():
+    assert _memory_limit_bytes(0) is None
+    assert _memory_limit_bytes(-1) is None
+    assert _memory_limit_bytes(1) == 1024 * 1024
+    assert _memory_limit_bytes(2**44 - 1) == (2**44 - 1) * 1024 * 1024
+    assert _memory_limit_bytes(2**44) is None
+
+
+@POSIX_ONLY
 def test_the_memory_limit_is_set_in_kib_and_0_sets_none(tmp_path):
     def soft_limit(runner):
         return runner.run("ulimit -S -d", tmp_path, 5).output
@@ -694,12 +822,9 @@ def test_the_memory_limit_is_set_in_kib_and_0_sets_none(tmp_path):
     assert CommandRunner(memory_limit=2048).run("ulimit -S -d; ulimit -H -d", tmp_path, 5).output == "2097152\n" * 2
     assert soft_limit(CommandRunner(memory_limit=1)) == "1024\n"
     assert soft_limit(CommandRunner(memory_limit=0)) == soft_limit(CommandRunner())
-    assert _limited("true", 0) == "true"
-    # ulimit -d takes KiB, and rlim_t holds bytes only below 2**64.
-    assert str((2**44 - 1) * 1024) in _limited(["true"], 2**44 - 1)
-    assert "unlimited" in _limited(["true"], 2**44)
 
 
+@POSIX_ONLY
 def test_a_lower_hard_memory_limit_stays_and_the_command_still_runs(tmp_path):
     code = (
         "from pathlib import Path; from mutator.runner import CommandRunner; "
