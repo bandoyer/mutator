@@ -1,4 +1,5 @@
 import collections
+import os
 import py_compile
 import re
 import shlex
@@ -10,10 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from mutator.cli import parse_args, run
+from mutator.cli import HELP, parse_args, run
 from mutator.crapper_link import ensure_crapper
 from mutator.runner import CommandResult
 from mutator.workers import new_run_dir
+
+_PASS_CMD = f'"{sys.executable}" -c "pass"'
+_FAIL_CMD = f'"{sys.executable}" -c "raise SystemExit(1)"'
 
 
 def test_lines_option_parses_positive_numbers():
@@ -313,7 +317,7 @@ def test_a_default_run_reads_only_the_reports_this_run_wrote(tmp_path, monkeypat
     monkeypatch.setattr(runners, "run_shell", _coverage_tools(tmp_path, fresh))
     monkeypatch.setattr(runners.shutil, "which", lambda _name: None)
     sources = [str(tmp_path / relative) for relative in want]
-    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", _PASS_CMD]
     run([*command, *args, *sources])
     got: dict[str, tuple[set[int], set[int]]] = {relative: (set(), set()) for relative in want}
     for status, relative, line in re.findall(r"^(SURVIVED|UNCOVERED) +(\S+):(\d+) ", capsys.readouterr().out, re.M):
@@ -369,7 +373,7 @@ _TS_CLOCK = "export function tick(): number {\n  return 1;\n}\n"
         pytest.param(
             {"src/demo.py": _PY_DEMO, "coverage/lcov.info": "SF:src/other.py\nDA:1,1\nend_of_record\n"},
             {},
-            ["--coverage-command", "true"],
+            ["--coverage-command", _PASS_CMD],
             {},
             ["src/demo.py"],
             id="command-report-omits-file",
@@ -389,7 +393,7 @@ def test_a_file_no_coverage_report_lists_stops_with_exit_2_and_runs_none_of_its_
     monkeypatch.setattr(runners, "run_shell", _coverage_tools(tmp_path, fresh))
     monkeypatch.setattr(runners.shutil, "which", lambda _name: None)
     sources = [str(tmp_path / relative) for relative in [*ran, *stopped]]
-    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", _PASS_CMD]
 
     code = run([*command, *args, *sources])
 
@@ -415,7 +419,7 @@ def test_a_file_a_report_lists_with_zero_hits_is_measured(tmp_path, monkeypatch,
     (tmp_path / "src" / "demo.py").write_text(_PY_DEMO, encoding="utf-8")
     zero = "SF:src/demo.py\nDA:1,0\nDA:2,0\nDA:5,0\nDA:6,0\nend_of_record\n"
     monkeypatch.setattr(ensure_crapper().runners, "run_shell", _coverage_tools(tmp_path, {".": zero}))
-    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+    command = ["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", _PASS_CMD]
 
     code = run([*command, str(tmp_path / "src" / "demo.py")])
 
@@ -435,19 +439,56 @@ def test_a_run_nested_in_its_own_worker_is_refused_before_it_runs_a_command(tmp_
     if link:
         (project / link).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / "storage").mkdir()
-        (project / link).symlink_to(tmp_path / "storage")
+        (project / link).symlink_to(tmp_path / "storage", target_is_directory=True)
     (project / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     marker = tmp_path / "nested-ran"
-    nested = [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all", "--max-workers", "1"]
-    nested += ["--test-command", f"touch {shlex.quote(str(marker))}", "demo.py"]
-    test = f'case "$PWD" in */run-*/worker-*) exec {shlex.join(nested)};; esac; exit 0'
+    touch_code = f"open({str(marker)!r}, 'w').close()"
+    nested = [
+        sys.executable,
+        "-m",
+        "mutator",
+        "--no-coverage",
+        "--mutate-all",
+        "--max-workers",
+        "1",
+        "--test-arg",
+        sys.executable,
+        "--test-arg",
+        "-c",
+        "--test-arg",
+        touch_code,
+        "demo.py",
+    ]
+    probe = (
+        "import os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "parts = Path(os.getcwd()).parts\n"
+        f"if len(parts) >= 2 and parts[-2].startswith('run-') and parts[-1].startswith('worker-'):\n"
+        f"    raise SystemExit(subprocess.run({nested!r}).returncode)\n"
+    )
 
-    code = run(["--root", str(project), "--no-coverage", "--mutate-all", "--max-workers", "1", "--test-command", test, "demo.py"])
+    code = run(
+        [
+            "--root",
+            str(project),
+            "--no-coverage",
+            "--mutate-all",
+            "--max-workers",
+            "1",
+            "--test-arg",
+            sys.executable,
+            "--test-arg",
+            "-c",
+            "--test-arg",
+            probe,
+            "demo.py",
+        ]
+    )
 
     err = capsys.readouterr().err
     assert code == 2
     assert "Unmutated tests failed in a mutation worker for demo.py" in err
-    assert re.search(r"mutator does not run in \S+/run-[^/]+/worker-0: it is inside", err), err
+    assert re.search(r"mutator does not run in \S+[/\\]run-[^/\\]+[/\\]worker-0: it is inside", err), err
     assert not marker.exists()
 
 
@@ -723,7 +764,7 @@ def test_the_same_timeout_factor_spelled_another_way_keeps_the_kill(tmp_path, ca
 def test_a_mutant_is_killed_when_it_passes_the_memory_limit_and_survives_with_none(tmp_path, capsys, limit, status):
     # Issue #58: the mutant 0 -> 1 makes the test ask for 128 MiB.
     (tmp_path / "demo.py").write_text("def size():\n    return 0\n", encoding="utf-8")
-    command = f"{sys.executable} -c 'import demo; bytes(demo.size() * 128 << 20)'"
+    command = f'"{sys.executable}" -c "import demo; bytes(demo.size() * 128 << 20)"'
     args = ["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", "--lines", "2"]
     run([*args, "--memory-limit", limit, "--test-command", command, "demo.py"])
     assert re.search(rf"^{status} +demo.py:2 0 -> 1$", capsys.readouterr().out, re.MULTILINE)
@@ -794,7 +835,7 @@ def test_a_site_on_a_later_line_of_a_covered_python_statement_runs(tmp_path, cap
     report.parent.mkdir(parents=True)
     report.write_text(_WRAPPED_LCOV, encoding="utf-8")
     want = {"run": {6, 7, 13, 19, 20, 23, 28, 43}, "uncovered": {22, 37, 38, 45}}
-    mutate = ["--use-existing-coverage", "--mutate-all", "--max-workers", "1", "--test-command", "true"]
+    mutate = ["--use-existing-coverage", "--mutate-all", "--max-workers", "1", "--test-command", _PASS_CMD]
 
     assert run(["--root", str(tmp_path), *mutate, str(source)]) == 3
     got = {"run": set(), "uncovered": set()}
@@ -899,7 +940,7 @@ def _failed_run_project(tmp_path, monkeypatch, language: str, codes: dict[str, i
 
 
 def _mutate(tmp_path, *sources: str) -> int:
-    return run(["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", "true", *sources])
+    return run(["--root", str(tmp_path), "--mutate-all", "--max-workers", "1", "--test-command", _PASS_CMD, *sources])
 
 
 _SITE = re.compile(r"^(KILLED|SURVIVED|UNCOVERED|TIMEOUT) ", re.M)
@@ -952,7 +993,11 @@ def test_one_failed_package_stops_the_whole_run(tmp_path, monkeypatch, capsys, f
     captured = capsys.readouterr()
     assert code == 2
     assert not _SITE.search(captured.out)
-    named = re.findall(r"^Coverage report from a failed run: \S+/target/coverage/python/(\w+)/lcov\.info ", captured.err, re.M)
+    named = re.findall(
+        r"^Coverage report from a failed run: \S+[/\\]target[/\\]coverage[/\\]python[/\\](\w+)[/\\]lcov\.info ",
+        captured.err,
+        re.M,
+    )
     assert named == failing
     assert captured.err.count("No mutant ran:") == 1
 
@@ -1010,21 +1055,38 @@ def _own_source_project(tmp_path: Path, pyc: str | None, name: str = "demo.py") 
     return source, cache
 
 
-def _own_source_command(kind: str, source: Path) -> str:
-    """The test command. `same-mtime` gives the worker's demo.py the project's mtime, as when a
-    mutant is written in the same second. `writes` turns bytecode writing on in a worker only, and
-    gives every write one mtime; mutator's baseline in the project writes nothing.
+def _own_source_test_args(kind: str, source: Path) -> list[str]:
+    """The test command as --test-arg flags. `same-mtime` gives the worker's demo.py the project's
+    mtime, as when a mutant is written in the same second. `writes` turns bytecode writing on in a
+    worker only, and gives every write one mtime; mutator's baseline in the project writes nothing.
     """
 
     relative = f"src/{source.name}"
+    pytest_argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
     if kind == "same-mtime":
-        utime = f"import os; s = os.stat({str(source)!r}); os.utime({relative!r}, ns=(s.st_atime_ns, s.st_mtime_ns))"
-        return f"{_PY} -c {shlex.quote(utime)} && {_PYTEST}"
-    if kind == "writes":
-        utime = f"import os; os.utime({relative!r}, (1700000000, 1700000000))"
-        in_worker = f"{_PY} -c {shlex.quote(utime)} && PYTHONDONTWRITEBYTECODE= {_PYTEST}"
-        return f"case $(pwd -P) in */target/mutation-workers/*) {in_worker} ;; *) {_PYTEST} ;; esac"
-    return _PYTEST
+        code = (
+            f"import os, subprocess, sys; s = os.stat({str(source)!r}); "
+            f"os.utime({relative!r}, ns=(s.st_atime_ns, s.st_mtime_ns)); "
+            f"raise SystemExit(subprocess.run({pytest_argv!r}).returncode)"
+        )
+        argv = [sys.executable, "-c", code]
+    elif kind == "writes":
+        code = (
+            "import os, subprocess\n"
+            "from pathlib import Path\n"
+            "env = os.environ.copy()\n"
+            "if 'mutation-workers' in Path(os.getcwd()).parts:\n"
+            f"    os.utime({relative!r}, (1700000000, 1700000000))\n"
+            "    env['PYTHONDONTWRITEBYTECODE'] = ''\n"
+            f"raise SystemExit(subprocess.run({pytest_argv!r}, env=env).returncode)\n"
+        )
+        argv = [sys.executable, "-c", code]
+    else:
+        argv = pytest_argv
+    flags: list[str] = []
+    for item in argv:
+        flags.extend(["--test-arg", item])
+    return flags
 
 
 @pytest.mark.parametrize(
@@ -1042,8 +1104,8 @@ def _own_source_command(kind: str, source: Path) -> str:
 def test_a_mutant_runs_its_own_source_and_leaves_the_projects_bytecode_alone(tmp_path, capsys, pyc, kind):
     source, cache = _own_source_project(tmp_path, pyc)
     before = cache.read_bytes() if pyc else None
-    command = _own_source_command(kind, source)
-    code = run(["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", "--test-command", command, str(source)])
+    test_args = _own_source_test_args(kind, source)
+    code = run(["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", *test_args, str(source)])
     out = capsys.readouterr().out
     assert re.findall(r"^(KILLED|SURVIVED) +src/demo.py:2 (.+)$", out, re.M) == _OWN_STATUSES
     assert code == 3
@@ -1065,8 +1127,159 @@ def test_a_mutant_runs_its_own_source_when_the_test_command_writes_bytecode(tmp_
     if prefix:
         monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "prefix"))
     source, _cache = _own_source_project(tmp_path, None, name)
-    command = _own_source_command("writes", source)
-    code = run(["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", "--test-command", command, str(source)])
+    test_args = _own_source_test_args("writes", source)
+    code = run(["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1", *test_args, str(source)])
     out = capsys.readouterr().out
     assert re.findall(rf"^(KILLED|SURVIVED) +src/{re.escape(name)}:2 (.+)$", out, re.M) == _OWN_STATUSES
     assert code == 3
+
+
+def test_test_arg_and_test_env_cli_parsing_and_help():
+    assert "--test-arg <value>" in HELP
+    assert "--test-env <KEY=VALUE>" in HELP
+
+    parsed = parse_args(
+        [
+            "--test-arg",
+            "pytest",
+            "--test-arg",
+            "-q",
+            "--test-arg",
+            "-m",
+            "--test-arg",
+            "not slow",
+            "--test-arg",
+            "--",
+            "--test-arg",
+            "-h",
+            "--test-arg",
+            "--help",
+            "--test-env",
+            "FOO=bar",
+            "--test-env",
+            "FLAGS=-q --strict=1",
+            "--test-env",
+            "EMPTY=",
+            "src/demo.py",
+        ]
+    )
+    assert parsed.action == "mutate"
+    assert parsed.test_args == ["pytest", "-q", "-m", "not slow", "--", "-h", "--help"]
+    assert parsed.test_env == {"FOO": "bar", "FLAGS": "-q --strict=1", "EMPTY": ""}
+    assert parsed.positionals == ["src/demo.py"]
+
+    # Mutually exclusive with --test-command.
+    conflict = parse_args(["--test-command", "pytest", "--test-arg", "pytest"])
+    assert conflict.exit_code == 1
+    assert "--test-command cannot be combined with --test-arg" in conflict.message
+
+    # Missing or invalid values exit 1.
+    assert parse_args(["--test-arg"]).exit_code == 1
+    assert parse_args(["--test-arg", ""]).exit_code == 1
+    assert parse_args(["--test-env"]).exit_code == 1
+    assert parse_args(["--test-env", "NOEQUALS"]).exit_code == 1
+    assert parse_args(["--test-env", "=value"]).exit_code == 1
+
+
+def test_test_arg_and_test_env_run_mutants_and_invalidate_kept_kills(tmp_path, capsys):
+    root = tmp_path / "project"
+    log = _kept_project(root, {})
+    argv_flags = [
+        "--test-arg",
+        sys.executable,
+        "--test-arg",
+        "check.py",
+    ]
+    base = ["--root", str(root), "--no-coverage", "--max-workers", "1", *argv_flags]
+
+    code = run([*base, "--test-env", "A=1", "--test-env", "B=2", "src/demo.py"])
+    first = capsys.readouterr()
+    assert code == 0, first.err
+    assert _F_KILLED.search(first.out)
+
+    # Same --test-arg and --test-env in a different order keeps the kills (only baseline runs).
+    runs = log.read_text().count("run")
+    code = run([*base, "--test-env", "B=2", "--test-env", "A=1", "src/demo.py"])
+    second = capsys.readouterr()
+    assert code == 0, second.err
+    assert log.read_text().count("run") - runs == 1
+
+    # Changing --test-env invalidates kept kills (baseline + worker control + 3 mutants = 5 runs).
+    runs = log.read_text().count("run")
+    code = run([*base, "--test-env", "A=1", "--test-env", "B=changed", "src/demo.py"])
+    third = capsys.readouterr()
+    assert code == 0, third.err
+    assert log.read_text().count("run") - runs == 5
+
+    # Passing BREAK_CHECKS=1 via --test-env reaches the test process and fails the baseline.
+    code = run([*base, "--test-env", "BREAK_CHECKS=1", "src/demo.py"])
+    broken = capsys.readouterr()
+    assert code == 2
+    assert "Baseline failed for src/demo.py" in broken.err
+
+    # Changing --test-arg invalidates kept kills.
+    code = run([*base, "--test-arg", "h", "--test-env", "A=1", "--test-env", "B=changed", "src/demo.py"])
+    weakened = capsys.readouterr()
+    assert code == 3, weakened.err
+    assert _F_SURVIVED.search(weakened.out)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows launcher smoke test")
+def test_mutator_cmd_smoke_runs_a_python_project(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    launcher = repo_root / "mutator.cmd"
+    assert launcher.is_file()
+
+    project = tmp_path / "demo_proj"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "calc.py").write_text(
+        "def add(a, b):\n    if a > 0:\n        return a + b\n    return 0\n",
+        encoding="utf-8",
+    )
+    (project / "test_calc.py").write_text(
+        "import sys\nsys.path.insert(0, 'src')\nfrom calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    crapper_src = Path(ensure_crapper().__file__).resolve().parents[1]
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{crapper_src}{os.pathsep}{existing_pp}" if existing_pp else str(crapper_src)
+
+    completed = subprocess.run(
+        [
+            "cmd.exe",
+            "/c",
+            str(launcher),
+            "--no-coverage",
+            "--mutate-all",
+            "--max-workers",
+            "1",
+            "--root",
+            str(project),
+            "--test-arg",
+            sys.executable,
+            "--test-arg",
+            "-m",
+            "--test-arg",
+            "pytest",
+            "--test-arg",
+            "-q",
+            "--test-arg",
+            "-p",
+            "--test-arg",
+            "no:cacheprovider",
+            "src/calc.py",
+        ],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 3, f"stdout={completed.stdout}\nstderr={completed.stderr}"
+    assert "KILLED" in completed.stdout
+    assert "SURVIVED" in completed.stdout
+    assert (project / ".metrics" / "mutate" / "calc.edn").is_file()
+    workers_dir = project / "target" / "mutation-workers"
+    assert not workers_dir.exists() or list(workers_dir.iterdir()) == []

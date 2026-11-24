@@ -93,6 +93,12 @@ Options:
   --test-command <cmd>          Run this command for the baseline and every
                                 mutant. The working directory is the project
                                 root.
+  --test-arg <value>            Append one argument to an argv test command run
+                                without a shell (may be repeated; accepts values
+                                starting with `-`). Cannot be combined with
+                                --test-command.
+  --test-env <KEY=VALUE>        Set an environment variable for test runs (may
+                                be repeated; KEY must be non-empty).
   --timeout-factor <number>     Mutant timeout, as a multiple of the baseline
                                 duration. Default: 10. The timeout is at least
                                 2 seconds.
@@ -105,10 +111,11 @@ Options:
                                 once. Default: one per core. The run uses the
                                 smaller of this limit, the cores, and the
                                 number of selected sites.
-  --memory-limit <MiB>          Limit each test process's data memory
-                                (RLIMIT_DATA) to this many MiB, so a mutant
-                                that allocates without bound fails and is
-                                killed. 0 means no limit. Default: {MEMORY_LIMIT}.
+  --memory-limit <MiB>          Limit each test run's memory (RLIMIT_DATA on
+                                POSIX, Job Object memory on Windows) to this
+                                many MiB, so a mutant that allocates without
+                                bound fails and is killed. 0 means no limit.
+                                Default: {MEMORY_LIMIT}.
   --verbose                     Print each test command, how it ended, and
                                 each mutant.
 
@@ -123,7 +130,7 @@ named {_skipped_directory_text()} are skipped.
 The default, once a snapshot exists, reruns survivors. It keeps a killed
 mutant only when no file git lists for the project changed, apart from
 .metrics/ and mutator's own folders under target/, and the test command, its
-directory, --timeout-factor, and --memory-limit are the same. Any edit to a
+directory, --test-env, --timeout-factor, and --memory-limit are the same. Any edit to a
 tracked or untracked file reruns every killed mutant. Outside a git repository
 nothing is kept. When kills are kept, the baseline still runs, so tests that
 fail now stop the file with exit 2. --mutate-all is unchanged: it reruns every
@@ -184,6 +191,8 @@ class Options:
     use_existing_coverage: bool = False
     coverage_command: str | None = None
     test_command: str | None = None
+    test_args: list[str] = field(default_factory=list)
+    test_env: dict[str, str] = field(default_factory=dict)
     timeout_factor: float = 10.0
     baseline_timeout: float = BASELINE_TIMEOUT
     mutation_warning: int = 50
@@ -197,6 +206,22 @@ def _take(args: list[str], index: int, option: str) -> str:
     if index + 1 >= len(args) or not args[index + 1] or args[index + 1].startswith("-"):
         raise ValueError(f"{option} requires a value")
     return args[index + 1]
+
+
+def _take_verbatim(args: list[str], index: int, option: str) -> str:
+    if index + 1 >= len(args):
+        raise ValueError(f"{option} requires a value")
+    return args[index + 1]
+
+
+def _take_env(args: list[str], index: int, option: str) -> tuple[str, str]:
+    if index + 1 >= len(args):
+        raise ValueError(f"{option} requires KEY=VALUE")
+    raw = args[index + 1]
+    key, sep, value = raw.partition("=")
+    if not sep or not key or "\0" in key or "\0" in value:
+        raise ValueError(f"{option} requires KEY=VALUE with a non-empty key")
+    return key, value
 
 
 def _positive(value: str, option: str) -> float:
@@ -233,13 +258,13 @@ def _lines(value: str) -> set[int]:
 
 def parse_args(argv: list[str] | None = None) -> Options:
     args = list(sys.argv[1:] if argv is None else argv)
-    if any(arg in {"-h", "--help"} for arg in args):
-        return Options(action="help", message=HELP, exit_code=0)
     options = Options(action="mutate")
     index = 0
     try:
         while index < len(args):
             arg = args[index]
+            if arg in {"-h", "--help"}:
+                return Options(action="help", message=HELP, exit_code=0)
             if arg in {"-s", "--source-root"}:
                 options.source_roots.append(_take(args, index, arg))
                 index += 2
@@ -254,6 +279,15 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 continue
             if arg == "--test-command":
                 options.test_command = _take(args, index, arg)
+                index += 2
+                continue
+            if arg == "--test-arg":
+                options.test_args.append(_take_verbatim(args, index, arg))
+                index += 2
+                continue
+            if arg == "--test-env":
+                key, value = _take_env(args, index, arg)
+                options.test_env[key] = value
                 index += 2
                 continue
             if arg == "--timeout-factor":
@@ -336,6 +370,18 @@ def parse_args(argv: list[str] | None = None) -> Options:
         return Options(
             action="help",
             message=f"--scan cannot be combined with --max-workers\n\n{HELP}",
+            exit_code=1,
+        )
+    if options.test_command is not None and options.test_args:
+        return Options(
+            action="help",
+            message=f"--test-command cannot be combined with --test-arg\n\n{HELP}",
+            exit_code=1,
+        )
+    if options.test_args and not options.test_args[0]:
+        return Options(
+            action="help",
+            message=f"--test-arg requires a non-empty command\n\n{HELP}",
             exit_code=1,
         )
     return options
@@ -611,13 +657,18 @@ def _finish(stopped: bool, survived: bool) -> int:
 
 
 def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> int:
-    runner = CommandRunner(verbose=options.verbose, memory_limit=options.memory_limit)
+    runner = CommandRunner(
+        verbose=options.verbose,
+        memory_limit=options.memory_limit,
+        env=options.test_env,
+    )
     baselines: dict[tuple[tuple[str, ...], str], CommandResult] = {}
     forms = []
     written: list[str] = []
     stopped = False
     survived = False
     files_digest = project_files_digest(root)
+    test_command = options.test_args or options.test_command
     for path in files:
         result = mutate_file(
             path,
@@ -627,7 +678,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], reports) -> i
             ignore_coverage=options.no_coverage,
             mutate_all=options.mutate_all,
             lines=options.lines,
-            test_command=options.test_command,
+            test_command=test_command,
             timeout_factor=options.timeout_factor,
             mutation_warning=options.mutation_warning,
             baselines=baselines,
@@ -663,11 +714,17 @@ def run(argv: list[str] | None = None) -> int:
 
     if threading.current_thread() is not threading.main_thread():
         return _run(argv)
-    earlier = signal.signal(signal.SIGTERM, _terminated)
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is None:
+        return _run(argv)
+    try:
+        earlier = signal.signal(sigterm, _terminated)
+    except (OSError, ValueError):
+        return _run(argv)
     try:
         return _run(argv)
     finally:
-        signal.signal(signal.SIGTERM, earlier)
+        signal.signal(sigterm, earlier)
 
 
 def _run(argv: list[str] | None) -> int:
